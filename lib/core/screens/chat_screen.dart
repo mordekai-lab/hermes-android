@@ -379,6 +379,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final Map<String, bool> _reasoningExpansionPins = {};
   bool? _delegatedTasksExpanded;
   RestChatReplyRetention? _restReplyRetention;
+  bool _hasSuccessfulHistoryRead = false;
   final ChatHistoryWindow _historyWindow = ChatHistoryWindow();
   bool _loadingOlder = false;
   final List<GatewayToolActivity> _toolActivities = [];
@@ -1766,11 +1767,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return;
       }
       _historyWindow.acceptRecent(batch);
+      _hasSuccessfulHistoryRead = true;
       _normalChat?.observeHistory(batch.rows);
-      final messages = _historyWindow.rows;
-      _extractToolMessages(messages);
+      final messages = _restHistoryForPresentation();
+      _extractToolMessages(
+        _historyWindow.rows,
+        replacePresentation: _restReplyRetention?.hasRetainedReply != true,
+      );
       setState(() {
-        _messages = _restReplyRetention?.reconcile(messages) ?? messages;
+        _messages = messages;
         // Server history is now authoritative; a submit catch that starts
         // after this point must not clobber it with composer-restore.
         _loading = false;
@@ -1825,7 +1830,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         recent.length == ChatHistoryWindow.pageSize,
       ),
     );
-    _extractToolMessages(_historyWindow.rows);
+    _hasSuccessfulHistoryRead = true;
+    // Decide the handover before changing presentation authority. A stale
+    // successful GET must not clear receipt runs or live tool observations.
+    _restReplyRetention?.reconcile(_historyWindow.rows);
+    _extractToolMessages(
+      _historyWindow.rows,
+      replacePresentation: _restReplyRetention?.hasRetainedReply != true,
+    );
   }
 
   Future<void> _loadOlderMessages() async {
@@ -3021,9 +3033,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // The server returns oldest-to-newest history. Preserve that order; the
     // gateway client appends the current prompt exactly once.
     final history = buildRestChatHistory(_messages);
-    _restReplyRetention = RestChatReplyRetention.admit(
+    final replyRetention = RestChatReplyRetention.admit(
       _messages,
-      historyKnown: _error == null,
+      historyKnown: _hasSuccessfulHistoryRead,
     );
     _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
 
@@ -3084,7 +3096,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         final assistant = _lastAssistantMessage();
         assistant?['_chat_response_complete'] = true;
         assistant?['_gateway_pending_response'] = false;
-        _restReplyRetention?.complete(_messages);
+        // A new admission does not revoke an older received reply. Install
+        // this replacement only after success, not on rejection or Stop.
+        replyRetention.complete(_messages);
+        _restReplyRetention = replyRetention;
         // Refresh messages to get the final server-side state
         try {
           final messages = await _getRecentMessages(widget.session.id);

@@ -368,6 +368,128 @@ void main() {
     },
   );
 
+  testWidgets(
+    'failed initial history is not a known empty REST admission floor',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'verbose_mode': false});
+      final client = _SseClient()..failHistory = true;
+      final fixture = _Fixture();
+      addTearDown(fixture.owner.close);
+      await fixture.open(tester, client: client, sse: true);
+      expect(find.text('Failed to load messages'), findsWidgets);
+      await fixture.send(tester);
+      client.frame(
+        'data: {"choices":[{"delta":{"content":"New answer"}}]}\n\n',
+      );
+      await tester.pump();
+      client.failHistory = false;
+      client.rows = [
+        {'id': 1, 'role': 'user', 'content': 'Old prompt'},
+        {'id': 2, 'role': 'assistant', 'content': 'Old answer'},
+      ];
+      client.frame('data: [DONE]\n\n');
+      await client.stream.close();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(_bubbles(tester), ['Question', 'New answer']);
+      expect(find.byType(ChatActivityBubble), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
+    'rejected next REST send cannot revoke a retained completed reply',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'verbose_mode': false});
+      final client = _SseClient();
+      final fixture = _Fixture();
+      addTearDown(fixture.owner.close);
+      await fixture.open(tester, client: client, sse: true);
+      await fixture.send(tester);
+      client.frame(
+        'data: {"choices":[{"delta":{"content":"Retained answer"}}]}\n\n',
+      );
+      client.frame('data: [DONE]\n\n');
+      await client.stream.close();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(_bubbles(tester), ['Question', 'Retained answer']);
+      client.rejectSubmissions = true;
+      await fixture.send(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(client.submissions, 2);
+      expect(find.byType(ChatActivityBubble), findsNothing);
+      expect(_bubbles(tester), ['Question', 'Retained answer']);
+      final readsBeforeRefresh = client.historyReads;
+      await tester.tap(find.byTooltip('Chat actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Refresh').hitTestable());
+      await tester.pumpAndSettle();
+      expect(client.historyReads, greaterThan(readsBeforeRefresh));
+      expect(_bubbles(tester), ['Question', 'Retained answer']);
+      expect(client.submissions, 2);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  testWidgets(
+    'stale successful REST history preserves verbose tool receipt order',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'verbose_mode': true});
+      await tester.binding.setSurfaceSize(const Size(800, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final client = _SseClient();
+      final fixture = _Fixture();
+      addTearDown(fixture.owner.close);
+      await fixture.open(tester, client: client, sse: true);
+      await fixture.send(tester);
+      client.frame(
+        'data: {"choices":[{"delta":{"content":"Before tool"}}]}\n\n',
+      );
+      client.frame(
+        'event: hermes.tool.progress\ndata: {"name":"terminal","tool_id":"t1","status":"running"}\n\n',
+      );
+      client.frame(
+        'event: hermes.tool.progress\ndata: {"name":"terminal","tool_id":"t1","status":"completed"}\n\n',
+      );
+      client.frame(
+        'data: {"choices":[{"delta":{"content":"After tool"}}]}\n\n',
+      );
+      client.frame('data: [DONE]\n\n');
+      await client.stream.close();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(_bubbles(tester), ['Question', 'Before tool', 'After tool']);
+      expect(find.byType(GatewayActivityCard), findsOneWidget);
+      final tile = find.descendant(
+        of: find.byType(GatewayActivityCard),
+        matching: find.byType(ExpansionTile),
+      );
+      expect(tester.widget<ExpansionTile>(tile).initiallyExpanded, false);
+      final before = tester
+          .getTopLeft(find.widgetWithText(MessageBubble, 'Before tool'))
+          .dy;
+      final tool = tester.getTopLeft(find.byType(GatewayActivityCard)).dy;
+      final after = tester
+          .getTopLeft(find.widgetWithText(MessageBubble, 'After tool'))
+          .dy;
+      expect(before, lessThan(tool));
+      expect(tool, lessThan(after));
+      final readsBeforeRefresh = client.historyReads;
+      await tester.tap(find.byTooltip('Chat actions'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Refresh').hitTestable());
+      await tester.pumpAndSettle();
+      expect(client.historyReads, greaterThan(readsBeforeRefresh));
+      expect(_bubbles(tester), ['Question', 'Before tool', 'After tool']);
+      expect(find.byType(GatewayActivityCard), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
   for (final historyOutcome in [
     'failed',
     'empty',
@@ -541,10 +663,21 @@ class _HistoryClient extends http.BaseClient {
 class _SseClient extends http.BaseClient {
   final stream = StreamController<List<int>>();
   bool failHistory = false;
+  bool rejectSubmissions = false;
+  int submissions = 0;
+  int historyReads = 0;
   List<Map<String, dynamic>> rows = [];
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (request.url.path.endsWith('/messages')) historyReads++;
     if (request.method == 'POST') {
+      submissions++;
+      if (rejectSubmissions) {
+        return http.StreamedResponse(
+          Stream.value(utf8.encode('Rejected')),
+          500,
+        );
+      }
       return http.StreamedResponse(
         stream.stream,
         200,
