@@ -145,11 +145,36 @@ void main() {
               .map((bubble) => bubble.content),
           status == GatewayRecoveryTurnStatus.completed ? ['Done'] : isEmpty,
         );
+        if (status == GatewayRecoveryTurnStatus.failed) {
+          expect(find.text('Turn failed'), findsOneWidget);
+        } else if (status == GatewayRecoveryTurnStatus.interrupted) {
+          expect(find.text('Response stopped.'), findsOneWidget);
+        }
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       },
     );
   }
+
+  testWidgets(
+    'fail-closed recovery stays visible without exposing partial prose',
+    (tester) async {
+      turnSession.pendingStates = [
+        _completedState().failReconcile(
+          GatewayTurnRecoveryFailure.protocolViolation,
+        ),
+      ];
+      await pumpChat(tester);
+      expect(find.byType(ChatActivityBubble), findsNothing);
+      expect(find.byType(MessageBubble), findsNothing);
+      expect(
+        find.text('Hermes stopped recovery safely. No prompt was resent.'),
+        findsOneWidget,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
 
   testWidgets('a turn settling in the background posts a notification', (
     tester,

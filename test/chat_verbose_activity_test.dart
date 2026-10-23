@@ -250,39 +250,193 @@ void main() {
   });
 
   testWidgets(
-    'normal SSE hides streamed prose and removes activity on completion',
+    'successful turn.end without message.complete reveals the final delta once',
     (tester) async {
       SharedPreferences.setMockInitialValues({'verbose_mode': false});
-      final client = _SseClient();
       final fixture = _Fixture();
       addTearDown(fixture.owner.close);
-      await fixture.open(tester, client: client, sse: true);
+      await fixture.open(tester);
       await fixture.send(tester);
-      client.frame(
-        'event: hermes.tool.progress\ndata: {"name":"terminal","tool_id":"t1","status":"running"}\n\n',
-      );
-      await tester.pump();
-      await tester.pump();
-      expect(find.text('Using Terminal…'), findsOneWidget);
-      client.frame(
-        'data: {"choices":[{"delta":{"content":"Hidden streamed answer"}}]}\n\n',
-      );
-      await tester.pump();
+      fixture.event('message.delta', {'text': 'Final deltas'});
       await tester.pump();
       expect(_bubbles(tester), ['Question']);
-      expect(find.byType(ChatActivityBubble), findsOneWidget);
-      client.failHistory = true;
-      client.frame('data: [DONE]\n\n');
-      await client.stream.close();
+      fixture.event('turn.end', {'status': 'completed'});
+      fixture.completion.complete();
       await tester.pump();
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 300));
+      expect(_bubbles(tester), ['Question', 'Final deltas']);
       expect(find.byType(ChatActivityBubble), findsNothing);
-      expect(_bubbles(tester), ['Question', 'Hidden streamed answer']);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await fixture.open(tester, id: 'stored-chat');
+      expect(_bubbles(tester), ['Question', 'Final deltas']);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
     },
   );
+
+  for (final status in ['failed', 'interrupted']) {
+    testWidgets(
+      'normal $status message.complete never promotes partial prose',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({'verbose_mode': false});
+        final fixture = _Fixture();
+        addTearDown(fixture.owner.close);
+        await fixture.open(tester);
+        await fixture.send(tester);
+        fixture.event('message.complete', {
+          'text': 'Incomplete answer',
+          'status': status,
+        });
+        fixture.completion.complete();
+        await tester.pump();
+        await tester.pump();
+        expect(_bubbles(tester), ['Question']);
+        expect(find.byType(ChatActivityBubble), findsNothing);
+        expect(find.byType(SnackBar), findsOneWidget);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+  }
+
+  testWidgets(
+    'delegation manual expansion survives new receipt items and resets on a new visit',
+    (tester) async {
+      SharedPreferences.setMockInitialValues({'verbose_mode': true});
+      await tester.binding.setSurfaceSize(const Size(800, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final fixture = _Fixture();
+      addTearDown(fixture.owner.close);
+      await fixture.open(tester);
+      await fixture.send(tester);
+      fixture.event('subagent.start', {
+        'subagent_id': 'child',
+        'goal': 'Inspect child',
+      });
+      await tester.pump();
+      await tester.tap(find.text('1 delegated task(s) active'));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Inspect child'), findsOneWidget);
+      fixture.event('message.delta', {'text': 'New prose before delegation'});
+      fixture.event('reasoning.delta', {'text': 'New reasoning'});
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Inspect child'), findsOneWidget);
+      expect(
+        tester
+            .widget<GatewaySubagentCard>(find.byType(GatewaySubagentCard))
+            .pinnedExpansion,
+        true,
+      );
+      fixture.event('message.delta', {'text': 'More text. ' * 4000});
+      for (var frame = 0; frame < 16; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.drag(find.byType(ListView).first, const Offset(0, 20000));
+      for (var frame = 0; frame < 16; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.byType(GatewaySubagentCard), findsNothing);
+      await tester.tap(find.bySemanticsLabel('Go to end'));
+      for (var frame = 0; frame < 16; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.text('Inspect child'), findsOneWidget);
+      await tester.tap(find.text('1 delegated task(s) active'));
+      await tester.pump(const Duration(milliseconds: 300));
+      fixture.event('tool.start', {'tool_id': 't1', 'name': 'terminal'});
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Inspect child'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await fixture.open(tester, id: 'stored-chat');
+      for (var frame = 0; frame < 16; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      expect(find.text('Inspect child'), findsNothing);
+      expect(
+        tester
+            .widget<GatewaySubagentCard>(find.byType(GatewaySubagentCard))
+            .pinnedExpansion,
+        isNull,
+      );
+      fixture.event('message.complete', {'text': 'Done'});
+      fixture.completion.complete();
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
+
+  for (final historyOutcome in [
+    'failed',
+    'empty',
+    'old',
+    'user-only',
+    'fresh',
+  ]) {
+    testWidgets(
+      'normal SSE retains its final answer with $historyOutcome history',
+      (tester) async {
+        SharedPreferences.setMockInitialValues({'verbose_mode': false});
+        final client = _SseClient();
+        final previous = <Map<String, dynamic>>[
+          {'id': 1, 'role': 'user', 'content': 'Older question'},
+          {'id': 2, 'role': 'assistant', 'content': 'Older answer'},
+        ];
+        client.rows = previous;
+        final fixture = _Fixture();
+        addTearDown(fixture.owner.close);
+        await fixture.open(tester, client: client, sse: true);
+        await fixture.send(tester);
+        client.frame(
+          'event: hermes.tool.progress\ndata: {"name":"terminal","tool_id":"t1","status":"running"}\n\n',
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(find.text('Using Terminal…'), findsOneWidget);
+        client.frame(
+          'data: {"choices":[{"delta":{"content":"Hidden streamed answer"}}]}\n\n',
+        );
+        await tester.pump();
+        await tester.pump();
+        expect(_bubbles(tester), [
+          'Older question',
+          'Older answer',
+          'Question',
+        ]);
+        expect(find.byType(ChatActivityBubble), findsOneWidget);
+        client.failHistory = historyOutcome == 'failed';
+        client.rows = switch (historyOutcome) {
+          'empty' => [],
+          'user-only' => [
+            ...previous,
+            {'id': 3, 'role': 'user', 'content': 'Question'},
+          ],
+          'fresh' => [
+            ...previous,
+            {'id': 3, 'role': 'user', 'content': 'Question'},
+            {'id': 4, 'role': 'assistant', 'content': 'Hidden streamed answer'},
+          ],
+          _ => previous,
+        };
+        client.frame('data: [DONE]\n\n');
+        await client.stream.close();
+        await tester.pump();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byType(ChatActivityBubble), findsNothing);
+        expect(_bubbles(tester), [
+          'Older question',
+          'Older answer',
+          'Question',
+          'Hidden streamed answer',
+        ]);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
+  }
 }
 
 List<String> _bubbles(WidgetTester tester) => tester
@@ -387,6 +541,7 @@ class _HistoryClient extends http.BaseClient {
 class _SseClient extends http.BaseClient {
   final stream = StreamController<List<int>>();
   bool failHistory = false;
+  List<Map<String, dynamic>> rows = [];
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
     if (request.method == 'POST') {
@@ -397,7 +552,7 @@ class _SseClient extends http.BaseClient {
       );
     }
     return http.StreamedResponse(
-      Stream.value(utf8.encode('{"data":[]}')),
+      Stream.value(utf8.encode(jsonEncode({'data': rows}))),
       failHistory ? 500 : 200,
       headers: {'content-type': 'application/json'},
     );

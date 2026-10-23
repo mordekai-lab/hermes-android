@@ -943,7 +943,7 @@ class NormalGatewayChatOwner {
           );
         }
         target['_gateway_pending_response'] = false;
-        target['_chat_response_complete'] = true;
+        target['_chat_response_complete'] = _failure(event.data) == null;
       }
     } else if (event.type.startsWith('tool.')) {
       final update = GatewayToolActivity.fromGatewayEvent(
@@ -1267,6 +1267,16 @@ class NormalGatewayChatOwner {
       }
       for (final row in _display) {
         row['_gateway_pending_response'] = false;
+        if (completed == false) row['_chat_response_complete'] = false;
+      }
+      // turn.end is also an authoritative success receipt. Some gateways send
+      // only final deltas then turn.end, without a separate message.complete.
+      // Never promote an interim preview or a failed/stopped partial answer.
+      if (completed == true && _display.isNotEmpty) {
+        final last = _display.last;
+        if (last['role'] == 'assistant' && last['_gateway_interim'] != true) {
+          last['_chat_response_complete'] = true;
+        }
       }
       _marker = null;
       _terminalReceipt = null;

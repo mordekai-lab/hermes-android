@@ -142,10 +142,14 @@ class GatewayNoticeCard extends StatelessWidget {
 class GatewaySubagentCard extends StatelessWidget {
   final List<GatewaySubagentActivity> activities;
   final ValueChanged<GatewaySubagentActivity>? onOpenTask;
+  final bool? pinnedExpansion;
+  final ValueChanged<bool>? onPinChanged;
 
   const GatewaySubagentCard({
     required this.activities,
     this.onOpenTask,
+    this.pinnedExpansion,
+    this.onPinChanged,
     super.key,
   });
 
@@ -155,7 +159,8 @@ class GatewaySubagentCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: ExpansionTile(
-        initiallyExpanded: false,
+        initiallyExpanded: pinnedExpansion ?? false,
+        onExpansionChanged: onPinChanged,
         leading: Icon(
           activities.any((task) => task.failed)
               ? Icons.error_outline

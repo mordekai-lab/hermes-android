@@ -18,7 +18,6 @@ import '../controllers/voice_composer_controller.dart';
 import '../controllers/delegated_task_controller.dart';
 import '../services/delegated_task_history.dart';
 import '../widgets/delegated_task_timeline.dart';
-
 import '../services/connection_manager.dart';
 import '../services/attachment_draft_service.dart';
 import '../services/composer_draft_store.dart';
@@ -59,6 +58,7 @@ import '../widgets/markdown_code_block.dart';
 import '../widgets/attachment_draft_tile.dart';
 import '../widgets/chat_end_affordance.dart';
 import '../widgets/chat_activity_bubble.dart';
+import '../utils/rest_chat_reply_retention.dart';
 import '../widgets/gateway_approval_dialog.dart';
 import '../widgets/gateway_clarify_dialog.dart';
 import '../widgets/gateway_insight_card.dart';
@@ -377,6 +377,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _messages = [];
   ChatTimeline _timeline = const ChatTimeline();
   final Map<String, bool> _reasoningExpansionPins = {};
+  bool? _delegatedTasksExpanded;
+  RestChatReplyRetention? _restReplyRetention;
   final ChatHistoryWindow _historyWindow = ChatHistoryWindow();
   bool _loadingOlder = false;
   final List<GatewayToolActivity> _toolActivities = [];
@@ -1768,7 +1770,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       final messages = _historyWindow.rows;
       _extractToolMessages(messages);
       setState(() {
-        _messages = messages;
+        _messages = _restReplyRetention?.reconcile(messages) ?? messages;
         // Server history is now authoritative; a submit catch that starts
         // after this point must not clobber it with composer-restore.
         _loading = false;
@@ -1855,7 +1857,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       _historyWindow.acceptOlder(older);
       _extractToolMessages(_historyWindow.rows, replacePresentation: false);
-      setState(() => _messages = _historyWindow.rows);
+      setState(() => _messages = _restHistoryForPresentation());
       final normalSnapshot = _normalChat?.snapshot;
       if (normalSnapshot?.turnId != null) {
         _applyNormalSnapshot(normalSnapshot!, hydrateHistory: false);
@@ -1919,7 +1921,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _acceptRecentMessages(messages);
       _normalChat?.observeHistory(messages);
       setState(() {
-        _messages = _historyWindow.rows;
+        _messages = _restHistoryForPresentation();
         _error = null;
       });
       final normalSnapshot = _normalChat?.snapshot;
@@ -2064,6 +2066,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                 text: context
                     .l10n
                     .hermes_stopped_recovery_safely_no_prompt_was_resent,
+              )
+            : projection.status == GatewayRecoveryTurnStatus.failed ||
+                  projection.status == GatewayRecoveryTurnStatus.interrupted
+            ? GatewayTurnStatus(
+                kind: 'terminal_notice',
+                text: projection.status == GatewayRecoveryTurnStatus.failed
+                    ? context.l10n.turn_failed
+                    : context.l10n.response_stopped,
               )
             : null;
       }
@@ -3011,6 +3021,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // The server returns oldest-to-newest history. Preserve that order; the
     // gateway client appends the current prompt exactly once.
     final history = buildRestChatHistory(_messages);
+    _restReplyRetention = RestChatReplyRetention.admit(
+      _messages,
+      historyKnown: _error == null,
+    );
     _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
 
     setState(() {
@@ -3067,7 +3081,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       },
       onDone: () async {
         if (!mounted || responseGeneration != _responseGeneration) return;
-        _lastAssistantMessage()?['_chat_response_complete'] = true;
+        final assistant = _lastAssistantMessage();
+        assistant?['_chat_response_complete'] = true;
+        assistant?['_gateway_pending_response'] = false;
+        _restReplyRetention?.complete(_messages);
         // Refresh messages to get the final server-side state
         try {
           final messages = await _getRecentMessages(widget.session.id);
@@ -3078,7 +3095,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           if (!mounted || responseGeneration != _responseGeneration) return;
           _acceptRecentMessages(messages);
           setState(() {
-            _messages = _historyWindow.rows;
+            _messages = _restHistoryForPresentation();
             if (pendingImage != null) {
               _attachmentDrafts.removeWhere(
                 (draft) => draft.id == pendingImage.id,
@@ -3092,7 +3109,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           _scheduleScrollTarget(_scrollCoordinator.endStreaming());
           if (_awaitingVoiceReply) {
             _awaitingVoiceReply = false;
-            final assistant = messages.reversed.firstWhere(
+            final assistant = _messages.reversed.firstWhere(
               (message) => message['role'] == 'assistant',
               orElse: () => const <String, dynamic>{},
             );
@@ -4880,13 +4897,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (_gatewayTurnStatus != null &&
-                        (_verboseMode ||
-                            _normalPhase ==
-                                NormalGatewayTurnPhase.reconciledUnknown) &&
-                        (_sending ||
-                            _streaming ||
-                            _normalPhase ==
-                                NormalGatewayTurnPhase.reconciledUnknown))
+                        (_hasPersistentTurnNotice ||
+                            (_verboseMode && (_sending || _streaming))))
                       Container(
                         width: double.infinity,
                         margin: const EdgeInsets.fromLTRB(4, 2, 4, 2),
@@ -4903,8 +4915,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         ),
                         child: Row(
                           children: [
-                            if (_normalPhase ==
-                                NormalGatewayTurnPhase.reconciledUnknown)
+                            if (_hasPersistentTurnNotice)
                               const Icon(Icons.info_outline, size: 14)
                             else
                               const SizedBox.square(
@@ -5188,6 +5199,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _activeClientTurnId ??
       _responseGeneration;
 
+  List<Map<String, dynamic>> _restHistoryForPresentation() =>
+      _restReplyRetention?.reconcile(_historyWindow.rows) ??
+      _historyWindow.rows;
+
+  bool get _hasPersistentTurnNotice =>
+      _normalPhase == NormalGatewayTurnPhase.reconciledUnknown ||
+      _gatewayTurnStatus?.kind == 'recovery_failed' ||
+      _gatewayTurnStatus?.kind == 'terminal_notice';
+
   bool get _showActivityBubble =>
       !_verboseMode &&
       _hiddenActivityTurn != _activityTurnKey &&
@@ -5314,7 +5334,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             }
             if (item is List<GatewaySubagentActivity>) {
               return GatewaySubagentCard(
+                key: const ValueKey('chat-delegated-tasks'),
                 activities: item,
+                pinnedExpansion: _delegatedTasksExpanded,
+                onPinChanged: (expanded) => _delegatedTasksExpanded = expanded,
                 onOpenTask: (task) => unawaited(_openDelegatedTask(task)),
               );
             }

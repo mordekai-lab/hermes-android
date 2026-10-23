@@ -913,57 +913,59 @@ void main() {
       },
     );
 
-    testWidgets(
-      'Remote previewed or reused completion appears once per turn, not once per chat',
-      (tester) async {
-        tester.view.devicePixelRatio = 1;
-        tester.view.physicalSize = const Size(1000, 4000);
-        addTearDown(tester.view.reset);
-        final remote = _ControlledRemotePrompt();
-        await _pumpChat(
-          verbose: true,
-          tester,
-          client: _ControlledChatHttpClient(const []),
-          connectionId: 'previewed-completion',
-          sessionId: 'previewed-completion',
-          remoteSubmit: remote.submit,
-        );
-
-        for (var turn = 1; turn <= 2; turn++) {
-          remote.started = Completer<void>();
-          await tester.enterText(find.byType(TextField), '3+4');
-          await tester.tap(find.byTooltip('Send'));
-          await tester.pump();
-          await remote.started.future;
-
-          remote.emit('message.start', {});
-          remote.emit('message.delta', {'text': 'Computing.'});
-          remote.emit('message.interim', {
-            'text': 'Computing.',
-            'already_streamed': true,
-          });
-          remote.emit('message.delta', {'text': '7'});
-          remote.emit('message.interim', {
-            'text': '7',
-            'already_streamed': true,
-          });
-          remote.emit('message.complete', {
-            'text': '7',
-            (turn == 1 ? 'response_previewed' : 'response_reused'): true,
-            'status': 'complete',
-          });
-          remote.finish();
-          await tester.pumpAndSettle();
-
-          expect(find.text('7', findRichText: true), findsNWidgets(turn));
-          expect(
-            find.text('Computing.', findRichText: true),
-            findsNWidgets(turn),
+    for (final verbose in [false, true]) {
+      testWidgets(
+        'Remote previewed or reused completion appears once per turn, not once per chat: verbose=$verbose',
+        (tester) async {
+          tester.view.devicePixelRatio = 1;
+          tester.view.physicalSize = const Size(1000, 4000);
+          addTearDown(tester.view.reset);
+          final remote = _ControlledRemotePrompt();
+          await _pumpChat(
+            verbose: verbose,
+            tester,
+            client: _ControlledChatHttpClient(const []),
+            connectionId: 'previewed-completion',
+            sessionId: 'previewed-completion',
+            remoteSubmit: remote.submit,
           );
-          expect(find.byTooltip('Send'), findsOneWidget);
-        }
-      },
-    );
+
+          for (var turn = 1; turn <= 2; turn++) {
+            remote.started = Completer<void>();
+            await tester.enterText(find.byType(TextField), '3+4');
+            await tester.tap(find.byTooltip('Send'));
+            await tester.pump();
+            await remote.started.future;
+
+            remote.emit('message.start', {});
+            remote.emit('message.delta', {'text': 'Computing.'});
+            remote.emit('message.interim', {
+              'text': 'Computing.',
+              'already_streamed': true,
+            });
+            remote.emit('message.delta', {'text': '7'});
+            remote.emit('message.interim', {
+              'text': '7',
+              'already_streamed': true,
+            });
+            remote.emit('message.complete', {
+              'text': '7',
+              (turn == 1 ? 'response_previewed' : 'response_reused'): true,
+              'status': 'complete',
+            });
+            remote.finish();
+            await tester.pumpAndSettle();
+
+            expect(find.text('7', findRichText: true), findsNWidgets(turn));
+            expect(
+              find.text('Computing.', findRichText: true),
+              verbose ? findsNWidgets(turn) : findsNothing,
+            );
+            expect(find.byTooltip('Send'), findsOneWidget);
+          }
+        },
+      );
+    }
 
     testWidgets(
       'Remote distinct transformed completion preserves commentary and a new message stays distinct',
@@ -1051,49 +1053,51 @@ void main() {
       },
     );
 
-    testWidgets(
-      'Remote previewed completion matches an earlier interim without discarding later commentary',
-      (tester) async {
-        final remote = _ControlledRemotePrompt();
-        await _pumpChat(
-          verbose: true,
-          tester,
-          client: _ControlledChatHttpClient(const []),
-          connectionId: 'earlier-interim-preview',
-          sessionId: 'earlier-interim-preview',
-          remoteSubmit: remote.submit,
-        );
-        await tester.enterText(find.byType(TextField), 'Explain the result');
-        await tester.tap(find.byTooltip('Send'));
-        await tester.pump();
-        await remote.started.future;
+    for (final verbose in [false, true]) {
+      testWidgets(
+        'Remote previewed completion matches an earlier interim without discarding later commentary: verbose=$verbose',
+        (tester) async {
+          final remote = _ControlledRemotePrompt();
+          await _pumpChat(
+            verbose: verbose,
+            tester,
+            client: _ControlledChatHttpClient(const []),
+            connectionId: 'earlier-interim-preview',
+            sessionId: 'earlier-interim-preview',
+            remoteSubmit: remote.submit,
+          );
+          await tester.enterText(find.byType(TextField), 'Explain the result');
+          await tester.tap(find.byTooltip('Send'));
+          await tester.pump();
+          await remote.started.future;
 
-        remote.emit('message.start', {});
-        remote.emit('message.delta', {'text': 'First answer'});
-        remote.emit('message.interim', {
-          'text': 'First answer',
-          'already_streamed': true,
-        });
-        remote.emit('message.delta', {'text': 'Later commentary'});
-        remote.emit('message.interim', {
-          'text': 'Later commentary',
-          'already_streamed': true,
-        });
-        // No message.start between the interims and completion: the gateway
-        // only sends it at turn start, so this exercises the real boundary.
-        remote.emit('message.complete', {
-          'text': 'First answer',
-          'response_previewed': true,
-        });
-        remote.finish();
-        await tester.pumpAndSettle();
-        expect(find.text('First answer', findRichText: true), findsOneWidget);
-        expect(
-          find.text('Later commentary', findRichText: true),
-          findsOneWidget,
-        );
-      },
-    );
+          remote.emit('message.start', {});
+          remote.emit('message.delta', {'text': 'First answer'});
+          remote.emit('message.interim', {
+            'text': 'First answer',
+            'already_streamed': true,
+          });
+          remote.emit('message.delta', {'text': 'Later commentary'});
+          remote.emit('message.interim', {
+            'text': 'Later commentary',
+            'already_streamed': true,
+          });
+          // No message.start between the interims and completion: the gateway
+          // only sends it at turn start, so this exercises the real boundary.
+          remote.emit('message.complete', {
+            'text': 'First answer',
+            'response_previewed': true,
+          });
+          remote.finish();
+          await tester.pumpAndSettle();
+          expect(find.text('First answer', findRichText: true), findsOneWidget);
+          expect(
+            find.text('Later commentary', findRichText: true),
+            verbose ? findsOneWidget : findsNothing,
+          );
+        },
+      );
+    }
 
     testWidgets(
       'Remote rendered completion matches raw interim text, then displays rendered text',
