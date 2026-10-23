@@ -18,7 +18,7 @@ import '../controllers/voice_composer_controller.dart';
 import '../controllers/delegated_task_controller.dart';
 import '../services/delegated_task_history.dart';
 import '../widgets/delegated_task_timeline.dart';
-import '../widgets/delegated_task_labels.dart';
+
 import '../services/connection_manager.dart';
 import '../services/attachment_draft_service.dart';
 import '../services/composer_draft_store.dart';
@@ -58,6 +58,7 @@ import '../widgets/chat_context_header.dart';
 import '../widgets/markdown_code_block.dart';
 import '../widgets/attachment_draft_tile.dart';
 import '../widgets/chat_end_affordance.dart';
+import '../widgets/chat_activity_bubble.dart';
 import '../widgets/gateway_approval_dialog.dart';
 import '../widgets/gateway_clarify_dialog.dart';
 import '../widgets/gateway_insight_card.dart';
@@ -461,6 +462,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _deferredHistoryRefreshPending = false;
   bool _deferredHistoryRefreshing = false;
   bool _stopResponseInFlight = false;
+  Object? _hiddenActivityTurn;
   bool _approvalDialogOpen = false;
   bool _approvalRouteOpen = false;
   Route<bool>? _approvalPromptRoute;
@@ -1622,6 +1624,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         (notification is OverscrollNotification &&
             notification.dragDetails != null);
     if (isDirectUserScroll) {
+      _initialEndFramesRemaining = 0;
       _scrollCoordinator.updateFromUserScroll(
         isNearEnd: _isNearEnd(notification.metrics),
       );
@@ -1638,6 +1641,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   void _goToEnd() {
     _applyScrollTarget(const ChatScrollTarget.end());
+    _startEndAlignment();
   }
 
   void _scheduleScrollTarget(ChatScrollTarget? target) {
@@ -1679,6 +1683,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       _scheduleScrollTarget(null);
       return;
     }
+    _startEndAlignment();
+  }
+
+  // Normal and verbose projections have different row heights. Resolve lazy
+  // extent estimates after an explicit end request, never on ordinary refresh.
+  void _startEndAlignment() {
     _initialEndFramesRemaining = _initialEndFrameBudget;
     _initialEndStableFrames = 0;
     _initialEndLastExtent = null;
@@ -2020,6 +2030,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           : _messages[messageIndex];
       message
         ..['content'] = nextText
+        ..['_chat_response_complete'] =
+            projection.status == GatewayRecoveryTurnStatus.completed &&
+            !projection.isFailClosed
         ..['_gateway_client_turn_id'] = projection.clientTurnId
         ..['_gateway_message_id'] = projection.messageId
         ..['_gateway_last_seq'] = projection.lastSeq
@@ -3035,6 +3048,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       onToken: (token) {
         if (!mounted || responseGeneration != _responseGeneration) return;
         setState(() {
+          _gatewayTurnStatus = null;
           if (_messages.isNotEmpty && _messages.last['role'] == 'assistant') {
             final assistant = _messages.last;
             final current = assistant['content'] as String;
@@ -3053,6 +3067,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       },
       onDone: () async {
         if (!mounted || responseGeneration != _responseGeneration) return;
+        _lastAssistantMessage()?['_chat_response_complete'] = true;
         // Refresh messages to get the final server-side state
         try {
           final messages = await _getRecentMessages(widget.session.id);
@@ -3417,7 +3432,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
     if (reasoning != null) {
       setState(() {
-        _gatewayTurnStatus = null;
+        _gatewayTurnStatus = const GatewayTurnStatus(
+          kind: 'reasoning',
+          text: '',
+        );
         final assistant = _lastAssistantMessage();
         if (assistant == null) return;
         final current = assistant['_gateway_reasoning']?.toString() ?? '';
@@ -3465,6 +3483,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     if (event.type == 'message.start') {
+      setState(() => _gatewayTurnStatus = null);
       _lastAssistantMessage()?.remove('_gateway_interim_boundary');
       return;
     }
@@ -3527,6 +3546,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         );
         if (assistant != null) {
           assistant['_gateway_pending_response'] = false;
+          assistant['_chat_response_complete'] = true;
           if (completeText.isNotEmpty) {
             final current = assistant['content']?.toString() ?? '';
             if (current.isEmpty) _registerMaterializedAssistantMessage();
@@ -3715,13 +3735,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     if (update == null || !mounted) return;
     setState(() {
       final merged = _mergeSubagentActivity(update);
-      if (!merged.isComplete) {
-        _gatewayTurnStatus = GatewayTurnStatus(
-          kind: 'subagent',
-          text: context.l10n.delegated_task(
-            delegatedTaskGoal(context.l10n, merged),
-          ),
-        );
+      if (!merged.isComplete || _gatewayTurnStatus?.kind == 'subagent') {
+        final active = _subagentActivities
+            .where((task) => !task.isComplete)
+            .lastOrNull;
+        _gatewayTurnStatus = active == null
+            ? null
+            : GatewayTurnStatus(kind: 'subagent', text: active.goal);
       }
     });
     if (_openTaskController == null) _scheduleStreamingFollow();
@@ -4400,6 +4420,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _stopResponse() async {
     if (!_streaming) return;
+    _hiddenActivityTurn = _activityTurnKey;
     final normal = _normalChat;
     if (normal?.snapshot.hasActiveTurn == true) {
       if (_stopResponseInFlight) return;
@@ -4629,12 +4650,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
           idx >= 0 ? _toolActivities[idx] : update,
         );
       }
-      _gatewayTurnStatus = GatewayTurnStatus(
-        kind: 'tool',
-        text: update.isTerminal
-            ? '${update.displayName}: ${update.statusLabel.toLowerCase()}'
-            : context.l10n.using(update.displayName),
-      );
+      if (!update.isTerminal || _gatewayTurnStatus?.kind == 'tool') {
+        _gatewayTurnStatus = GatewayTurnStatus.forRunningTool(
+          _timeline
+              .forScope(assistant ?? Object())
+              .where((run) => run.activity != null)
+              .map((run) => run.activity!),
+        );
+      }
     });
 
     _scheduleStreamingFollow();
@@ -4857,6 +4880,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (_gatewayTurnStatus != null &&
+                        (_verboseMode ||
+                            _normalPhase ==
+                                NormalGatewayTurnPhase.reconciledUnknown) &&
                         (_sending ||
                             _streaming ||
                             _normalPhase ==
@@ -4890,7 +4916,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                             const SizedBox(width: 10),
                             Expanded(
                               child: Text(
-                                _gatewayTurnStatus!.text,
+                                _activityLabel(_gatewayTurnStatus!),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                                 style: Theme.of(context).textTheme.bodySmall,
@@ -5157,6 +5183,26 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
+  Object get _activityTurnKey =>
+      _normalChat?.snapshot.turnId ??
+      _activeClientTurnId ??
+      _responseGeneration;
+
+  bool get _showActivityBubble =>
+      !_verboseMode &&
+      _hiddenActivityTurn != _activityTurnKey &&
+      ((_normalChat?.snapshot.hasActiveTurn ?? false) ||
+          _sending ||
+          _streaming ||
+          _pendingReattachResync);
+
+  String _activityLabel(GatewayTurnStatus status) => switch (status.kind) {
+    'thinking' || 'reasoning' => '${context.l10n.reasoning}…',
+    'tool' => context.l10n.using(status.text),
+    'subagent' => context.l10n.delegated_task(status.text),
+    _ => status.text.isEmpty ? context.l10n.hermes_is_responding : status.text,
+  };
+
   Widget _buildBody() {
     if (_loading && _messages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
@@ -5198,8 +5244,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       subagentActivities: _subagentActivities,
       notices: _gatewayNotices,
       verbose: _verboseMode,
+      active: _streaming || _pendingReattachResync,
       timeline: _timeline,
     );
+    if (_showActivityBubble) {
+      displayMessages.add(
+        _gatewayTurnStatus ??
+            const GatewayTurnStatus(kind: 'responding', text: ''),
+      );
+    }
 
     // The stored row is the durable anchor once available. Carry a pin made
     // while this group was still streaming across the tool-id → row-id handoff.
@@ -5239,6 +5292,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             }
             final item =
                 displayMessages[index - (_historyWindow.hasOlder ? 1 : 0)];
+
+            if (item is GatewayTurnStatus) {
+              return ChatActivityBubble(label: _activityLabel(item));
+            }
 
             if (item is ChatToolActivityGroup) {
               return GatewayActivityCard(

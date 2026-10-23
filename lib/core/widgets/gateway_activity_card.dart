@@ -66,7 +66,7 @@ class _GatewayActivityCardState extends State<GatewayActivityCard> {
   bool get _hasRunningActivity =>
       widget.activities.any((activity) => !activity.isTerminal);
 
-  bool get _autoExpanded => widget.verbose;
+  bool get _autoExpanded => false;
 
   GatewayToolActivity? get _previewActivity {
     // Prefer work still in flight, even when a parallel call finished later.

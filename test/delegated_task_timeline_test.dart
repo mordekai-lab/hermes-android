@@ -28,7 +28,7 @@ Widget app(Widget home) => MaterialApp(
   home: home,
 );
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  setUp(() => SharedPreferences.setMockInitialValues({'verbose_mode': true}));
 
   test(
     'every shipped locale resolves task labels and typed failures',
@@ -225,8 +225,21 @@ void main() {
         );
         expect(card.activities, hasLength(1));
         expect(card.activities.single.isComplete, isFalse);
+        await tester.ensureVisible(find.byType(GatewaySubagentCard));
+        await tester.pump();
+        await tester.tap(
+          find.descendant(
+            of: find.byType(GatewaySubagentCard),
+            matching: find.byType(ExpansionTile),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
         final row = find.byKey(const ValueKey('delegated-task-runtime'));
-        await tester.ensureVisible(row);
+        for (var attempt = 0; attempt < 3; attempt++) {
+          await Scrollable.ensureVisible(tester.element(row), alignment: 0.5);
+          await tester.pump(const Duration(milliseconds: 300));
+        }
+        expect(row.hitTestable(), findsOneWidget);
         await tester.tap(row);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 350));
@@ -617,6 +630,13 @@ void main() {
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 300));
         final row = find.byKey(const ValueKey('delegated-task-runtime'));
+        await tester.tap(
+          find.descendant(
+            of: find.byType(GatewaySubagentCard),
+            matching: find.byType(ExpansionTile),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 300));
         await tester.ensureVisible(row);
         await tester.pump();
         await tester.enterText(composer, 'Keep this draft');
@@ -632,6 +652,10 @@ void main() {
             .position;
         // Programmatic positioning must not change the sticky follow intent.
         // The parent is near the end but not at it when inspection opens.
+        for (var attempt = 0; attempt < 3; attempt++) {
+          position.jumpTo(position.maxScrollExtent);
+          await tester.pump(const Duration(milliseconds: 300));
+        }
         position.jumpTo(position.maxScrollExtent - 10);
         await tester.pump();
         final offset = position.pixels;
@@ -755,24 +779,23 @@ void main() {
         // Receipt-ordered prose remains split around reasoning/tool runs.
         position.jumpTo(position.maxScrollExtent);
         await tester.pump();
+        final renderedItems = _chatItems(tester);
         expect(
-          tester
-              .widgetList<MessageBubble>(find.byType(MessageBubble))
+          renderedItems
+              .whereType<MessageBubble>()
               .map((bubble) => bubble.content)
               .join(),
           endsWith(finalText),
         );
         expect(
-          tester
-              .widgetList<GatewayReasoningCard>(
-                find.byType(GatewayReasoningCard),
-              )
-              .map((card) => card.text),
+          renderedItems.whereType<GatewayReasoningCard>().map(
+            (card) => card.text,
+          ),
           contains('Parent exposed reasoning while inspecting'),
         );
-        expect(find.byType(GatewayActivityCard), findsOneWidget);
-        final parentTool = tester
-            .widget<GatewayActivityCard>(find.byType(GatewayActivityCard))
+        final parentTool = renderedItems
+            .whereType<GatewayActivityCard>()
+            .single
             .activities
             .single;
         expect(parentTool.toolId, 'parent-tool');
@@ -787,15 +810,26 @@ void main() {
         );
         await tester.pump();
         expect(
-          tester
-              .widget<GatewaySubagentCard>(find.byType(GatewaySubagentCard))
-              .activities
-              .single
-              .failed,
+          _chatItems(
+            tester,
+          ).whereType<GatewaySubagentCard>().single.activities.single.failed,
           isTrue,
         );
         await tester.pumpWidget(const SizedBox());
       },
     );
   }
+}
+
+List<Widget> _chatItems(WidgetTester tester) {
+  final list = find
+      .descendant(of: find.byType(ChatScreen), matching: find.byType(ListView))
+      .first;
+  final delegate =
+      tester.widget<ListView>(list).childrenDelegate
+          as SliverChildBuilderDelegate;
+  return [
+    for (var index = 0; index < delegate.childCount!; index++)
+      delegate.builder(tester.element(list), index)!,
+  ];
 }

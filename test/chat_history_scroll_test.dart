@@ -137,6 +137,7 @@ void main() {
           addTearDown(tester.view.resetPhysicalSize);
           final remote = _ControlledRemotePrompt();
           await _pumpChat(
+            verbose: true,
             tester,
             client: _ControlledChatHttpClient(const []),
             connectionId: 'reasoning-order-$completionFlag',
@@ -197,6 +198,7 @@ void main() {
           await tester.pump(const Duration(milliseconds: 300));
           await tester.tap(find.text('Reasoning').last);
           await tester.pump(const Duration(milliseconds: 300));
+          await tester.tap(find.text('Reasoning').last);
           await tester.pump(const Duration(milliseconds: 300));
           expect(find.text('R1'), findsOneWidget);
           expect(find.text('R2'), findsNothing);
@@ -230,6 +232,7 @@ void main() {
           addTearDown(tester.view.resetPhysicalSize);
           final client = _ControlledChatHttpClient(const []);
           await _pumpChat(
+            verbose: true,
             tester,
             client: client,
             connectionId: 'sse-${newline.length}',
@@ -333,6 +336,7 @@ void main() {
           {'id': 2, 'role': 'assistant', 'content': 'Old answer'},
         ]);
         await _pumpChat(
+          verbose: true,
           tester,
           client: client,
           connectionId: 'reattach-order',
@@ -421,6 +425,7 @@ void main() {
             },
         ]);
         await _pumpChat(
+          verbose: true,
           tester,
           client: client,
           connectionId: 'paging-order',
@@ -488,6 +493,7 @@ void main() {
         addTearDown(tester.view.resetPhysicalSize);
         final remote = _ControlledRemotePrompt();
         await _pumpChat(
+          verbose: true,
           tester,
           client: _ControlledChatHttpClient(const []),
           connectionId: 'stock-order',
@@ -536,6 +542,7 @@ void main() {
       addTearDown(tester.view.resetPhysicalSize);
       final remote = _ControlledRemotePrompt();
       await _pumpChat(
+        verbose: true,
         tester,
         client: _ControlledChatHttpClient(const []),
         connectionId: 'ordered',
@@ -909,8 +916,12 @@ void main() {
     testWidgets(
       'Remote previewed or reused completion appears once per turn, not once per chat',
       (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1000, 4000);
+        addTearDown(tester.view.reset);
         final remote = _ControlledRemotePrompt();
         await _pumpChat(
+          verbose: true,
           tester,
           client: _ControlledChatHttpClient(const []),
           connectionId: 'previewed-completion',
@@ -957,8 +968,12 @@ void main() {
     testWidgets(
       'Remote distinct transformed completion preserves commentary and a new message stays distinct',
       (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1000, 4000);
+        addTearDown(tester.view.reset);
         final remote = _ControlledRemotePrompt();
         await _pumpChat(
+          verbose: true,
           tester,
           client: _ControlledChatHttpClient(const []),
           connectionId: 'rewritten-completion',
@@ -1041,6 +1056,7 @@ void main() {
       (tester) async {
         final remote = _ControlledRemotePrompt();
         await _pumpChat(
+          verbose: true,
           tester,
           client: _ControlledChatHttpClient(const []),
           connectionId: 'earlier-interim-preview',
@@ -1124,6 +1140,7 @@ void main() {
           addTearDown(tester.view.resetPhysicalSize);
           final remote = _ControlledRemotePrompt();
           await _pumpChat(
+            verbose: true,
             tester,
             client: _ControlledChatHttpClient(const []),
             connectionId: 'late-$event',
@@ -1149,10 +1166,7 @@ void main() {
             'verbose': lateVerbose,
           });
           await tester.pump(const Duration(milliseconds: 300));
-          expect(
-            find.text('Reasoning for $event'),
-            lateVerbose ? findsOneWidget : findsNothing,
-          );
+          expect(find.text('Reasoning for $event'), findsNothing);
           remote.emit('message.complete', {
             'text': 'Answer for $event',
             'response_previewed': true,
@@ -1172,10 +1186,12 @@ void main() {
           );
           expect(
             completedCards.map((card) => card.initiallyExpanded),
-            event == 'reasoning.available' ? [false] : [false, true],
+            event == 'reasoning.available' ? [false] : [false, false],
           );
-          await tester.tap(find.text('Reasoning').first);
-          await tester.pumpAndSettle();
+          for (var index = 0; index < completedCards.length; index++) {
+            await tester.tap(find.text('Reasoning').at(index));
+            await tester.pumpAndSettle();
+          }
           expect(find.text('Reasoning for $event'), findsOneWidget);
           expect(
             find.text('Partial reasoning. '),
@@ -1259,7 +1275,10 @@ Future<void> _pumpChat(
   Future<String?> Function()? serverFilePicker,
   List<AttachmentDraft> initialDrafts = const [],
   bool settle = true,
+  bool verbose = false,
 }) async {
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('verbose_mode', verbose);
   final apiClient = ApiClient(
     baseUrl: 'http://fixture.example',
     apiKey: 'synthetic-test-key',

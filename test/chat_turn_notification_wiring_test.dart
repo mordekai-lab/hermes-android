@@ -11,6 +11,7 @@ import 'package:hermes_android/core/services/gateway_turn_coordinator.dart';
 import 'package:hermes_android/core/services/gateway_turn_recovery.dart';
 import 'package:hermes_android/core/services/turn_notification_service.dart';
 import 'package:hermes_android/core/widgets/gateway_approval_dialog.dart';
+import 'package:hermes_android/core/widgets/chat_activity_bubble.dart';
 import 'package:hermes_android/core/services/ws_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
@@ -106,6 +107,48 @@ void main() {
     ]) {
       tester.binding.handleAppLifecycleStateChanged(state);
     }
+  }
+
+  for (final status in [
+    GatewayRecoveryTurnStatus.running,
+    GatewayRecoveryTurnStatus.waitingInput,
+    GatewayRecoveryTurnStatus.completed,
+    GatewayRecoveryTurnStatus.failed,
+    GatewayRecoveryTurnStatus.interrupted,
+  ]) {
+    testWidgets(
+      'normal recovery activity follows authoritative ${status.name}',
+      (tester) async {
+        turnSession.pendingStates = [
+          status == GatewayRecoveryTurnStatus.completed
+              ? _completedState()
+              : GatewayTurnRecoveryState.initial(
+                  clientTurnId: _clientTurnId,
+                ).markSubmissionStarted().applyAck(
+                  GatewayTurnAck(
+                    clientTurnId: _clientTurnId,
+                    turnId: 'server-turn',
+                    status: status,
+                    lastSeq: 0,
+                    created: false,
+                  ),
+                ),
+        ];
+        await pumpChat(tester);
+        expect(
+          find.byType(ChatActivityBubble),
+          status.isTerminal ? findsNothing : findsOneWidget,
+        );
+        expect(
+          tester
+              .widgetList<MessageBubble>(find.byType(MessageBubble))
+              .map((bubble) => bubble.content),
+          status == GatewayRecoveryTurnStatus.completed ? ['Done'] : isEmpty,
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      },
+    );
   }
 
   testWidgets('a turn settling in the background posts a notification', (
@@ -526,6 +569,7 @@ GatewayTurnRecoveryState _interruptedState() =>
 /// Turn session that keeps the settle callback ChatScreen registers, so a test
 /// can fire it the way the real gateway would.
 class _CallbackCapturingTurnSession implements GatewayTurnApplicationSession {
+  List<GatewayTurnRecoveryState> pendingStates = const [];
   @override
   bool get hasActiveTurn => false;
 
@@ -656,7 +700,7 @@ class _CallbackCapturingTurnSession implements GatewayTurnApplicationSession {
   Future<List<GatewayTurnRecoveryState>> recoverPending(
     String localSessionId, {
     GatewayTurnStateCallback? onState,
-  }) async => const <GatewayTurnRecoveryState>[];
+  }) async => pendingStates;
 
   @override
   Future<GatewayTurnRecoveryState> submit({

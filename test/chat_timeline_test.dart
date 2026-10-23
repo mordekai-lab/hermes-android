@@ -55,6 +55,7 @@ void main() {
     expect(
       labels(
         buildChatDisplayItems(
+          verbose: true,
           messages: [Map<String, dynamic>.unmodifiable(row)],
           timeline: state,
         ),
@@ -107,7 +108,13 @@ void main() {
           .tool(assistant, tool('t2'))
           .appendText(assistant, 'C');
       expect(
-        labels(buildChatDisplayItems(messages: [assistant], timeline: state)),
+        labels(
+          buildChatDisplayItems(
+            verbose: true,
+            messages: [assistant],
+            timeline: state,
+          ),
+        ),
         ['A', 'reasoning:R1', 't1', 'B', 'reasoning:R2', 't2', 'C'],
       );
       final snapshot = state.reasoning(
@@ -116,7 +123,11 @@ void main() {
       );
       expect(
         labels(
-          buildChatDisplayItems(messages: [assistant], timeline: snapshot),
+          buildChatDisplayItems(
+            verbose: true,
+            messages: [assistant],
+            timeline: snapshot,
+          ),
         ),
         ['A', 'reasoning:R1', 't1', 'B', 'reasoning:R2', 't2', 'C'],
       );
@@ -141,11 +152,16 @@ void main() {
           .tool(pending, tool('t'))
           .reassignScope(pending, a)
           .textSnapshot(a, 'A rendered', preservePosition: true);
-      expect(labels(buildChatDisplayItems(messages: [a, b], timeline: state)), [
-        'A rendered',
-        'B',
-        't',
-      ]);
+      expect(
+        labels(
+          buildChatDisplayItems(
+            verbose: true,
+            messages: [a, b],
+            timeline: state,
+          ),
+        ),
+        ['A rendered', 'B', 't'],
+      );
     },
   );
 
@@ -153,6 +169,7 @@ void main() {
     'durable call IDs match exact references rather than activity queue position',
     () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'id': 1, 'role': 'tool', 'tool_call_id': 'one', 'content': 'ok'},
           {'id': 2, 'role': 'assistant', 'content': 'middle'},
@@ -184,6 +201,7 @@ void main() {
       final now = DateTime.utc(2026, 10, 23, 1, 2, 3);
       final after = before.tool(assistant, tool('t1', complete: true, at: now));
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [assistant],
         toolActivities: [t1, t2, t3],
         timeline: after,
@@ -288,7 +306,13 @@ void main() {
           'reasoning:R2',
         ];
         expect(
-          labels(buildChatDisplayItems(messages: [assistant], timeline: next)),
+          labels(
+            buildChatDisplayItems(
+              verbose: true,
+              messages: [assistant],
+              timeline: next,
+            ),
+          ),
           expected,
         );
         expect(next.runs.map((run) => run.id), state.runs.map((run) => run.id));
@@ -309,7 +333,11 @@ void main() {
         );
         expect(
           labels(
-            buildChatDisplayItems(messages: [assistant], timeline: confirmed),
+            buildChatDisplayItems(
+              verbose: true,
+              messages: [assistant],
+              timeline: confirmed,
+            ),
           ),
           expected,
         );
@@ -351,6 +379,7 @@ void main() {
           .reasoning(assistant, reasoning('R'))
           .appendText(assistant, 'B');
       buildChatDisplayItems(
+        verbose: true,
         messages: messages,
         timeline: state,
         toolActivities: [tool('t')],
@@ -382,6 +411,7 @@ void main() {
       expect(
         labels(
           buildChatDisplayItems(
+            verbose: true,
             messages: durable,
             timeline: const ChatTimeline(),
             toolActivities: [tool('t', complete: true)],
@@ -393,6 +423,7 @@ void main() {
       expect(
         labels(
           buildChatDisplayItems(
+            verbose: true,
             messages: durable,
             timeline: state,
             toolActivities: [tool('t', complete: true)],

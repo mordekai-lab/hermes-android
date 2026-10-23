@@ -285,6 +285,15 @@ class GatewayTurnStatus {
 
   const GatewayTurnStatus({required this.kind, required this.text});
 
+  static GatewayTurnStatus? forRunningTool(
+    Iterable<GatewayToolActivity> activities,
+  ) {
+    final tool = activities.where((tool) => !tool.isTerminal).lastOrNull;
+    return tool == null
+        ? null
+        : GatewayTurnStatus(kind: 'tool', text: tool.displayName);
+  }
+
   static GatewayTurnStatus? fromGatewayEvent(
     String eventType,
     Map<String, dynamic> data,

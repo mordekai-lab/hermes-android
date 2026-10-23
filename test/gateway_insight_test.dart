@@ -137,8 +137,8 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
           body: ListView(
             children: const [
@@ -172,8 +172,8 @@ void main() {
   testWidgets('subagent card exposes delegated progress', (tester) async {
     await tester.pumpWidget(
       MaterialApp(
-      localizationsDelegates: AppLocalizations.localizationsDelegates,
-      supportedLocales: AppLocalizations.supportedLocales,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
         home: Scaffold(
           body: GatewaySubagentCard(
             activities: [
@@ -189,6 +189,9 @@ void main() {
     );
 
     expect(find.text('1 delegated task(s) active'), findsOneWidget);
+    expect(find.text('Inspect Android transport'), findsNothing);
+    await tester.tap(find.byType(ExpansionTile));
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.text('Inspect Android transport'), findsOneWidget);
   });
 }

@@ -57,8 +57,12 @@ List<dynamic> buildChatDisplayItems({
   List<GatewaySubagentActivity> subagentActivities = const [],
   List<GatewayNotice> notices = const [],
   bool verbose = false,
+  bool active = false,
   ChatTimeline? timeline,
 }) {
+  if (!verbose) {
+    return <dynamic>[..._conversationItems(messages, active: active)];
+  }
   final toolQueue = List<GatewayToolActivity>.from(toolActivities);
   // A turn can contain several canonical interim rows. Project their receipt
   // runs together at the first live anchor so consuming an earlier preview
@@ -158,9 +162,7 @@ List<dynamic> buildChatDisplayItems({
         }
         flushToolGroup();
         if (run.kind == ChatTimelineKind.reasoning) {
-          displayItems.add(
-            ChatReasoningItem(run.text, verbose || run.verbose, id: run.id),
-          );
+          displayItems.add(ChatReasoningItem(run.text, false, id: run.id));
         } else if (run.text.isNotEmpty) {
           displayItems.add({
             ...scopeRows[run.scope]!,
@@ -185,7 +187,7 @@ List<dynamic> buildChatDisplayItems({
       displayItems.add(
         ChatReasoningItem(
           reasoning,
-          verbose || msg['_gateway_reasoning_verbose'] == true,
+          false,
           id: 'reasoning:${msg['id'] ?? msg['message_id'] ?? identityHashCode(msg)}',
         ),
       );
@@ -219,4 +221,65 @@ List<dynamic> buildChatDisplayItems({
   displayItems.addAll(notices);
 
   return displayItems;
+}
+
+/// Normal chat is a conversation, not a trace. Keep the full canonical reply
+/// together instead of splitting it at reasoning/tool receipt boundaries.
+List<Map<String, dynamic>> _conversationItems(
+  List<Map<String, dynamic>> messages, {
+  required bool active,
+}) {
+  final items = <Map<String, dynamic>>[];
+  String? prompt;
+  final lastUser = messages.lastIndexWhere((row) => row['role'] == 'user');
+
+  for (var index = 0; index < messages.length; index++) {
+    final message = messages[index];
+    final rawRole = message['role'];
+    final role = rawRole == 'agent' ? 'assistant' : rawRole;
+    if (isToolResultMessage(message)) {
+      continue;
+    }
+    if (role != 'user' && role != 'assistant') continue;
+    final content = stripToolResultText(
+      messageContentToText(message['content']),
+    );
+    if (role == 'user') {
+      if (content.isNotEmpty) {
+        prompt = content;
+        items.add({...message, '_display_content': content});
+      }
+      continue;
+    }
+    // Canonical rows do not always carry outcome metadata. Exclude known
+    // intermediates, but never guess that an older answer was commentary.
+    final toolCalls = message['tool_calls'];
+    final callsTools = toolCalls is List
+        ? toolCalls.isNotEmpty
+        : toolCalls != null && toolCalls.toString().trim() != '[]';
+    if (content.isEmpty ||
+        callsTools ||
+        message['function_call'] != null ||
+        message['tool_call_id'] != null ||
+        message['toolCallId'] != null ||
+        message['finish_reason'] == 'tool_calls' ||
+        message['_gateway_interim'] == true ||
+        message['interim'] == true ||
+        message['is_interim'] == true ||
+        message['_gateway_pending_response'] == true ||
+        (active &&
+            index > lastUser &&
+            message['_chat_response_complete'] != true) ||
+        (message.containsKey('_gateway_pending_response') &&
+            message['_chat_response_complete'] != true)) {
+      continue;
+    }
+    items.add({
+      ...message,
+      'role': 'assistant',
+      '_display_content': content,
+      '_retry_prompt': ?prompt,
+    });
+  }
+  return items;
 }

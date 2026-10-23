@@ -823,6 +823,15 @@ class NormalGatewayChatOwner {
           _subagents[index] = merged;
         }
         if (_subagents.length > 128) _subagents.removeAt(0);
+        if (snapshot.hasActiveTurn &&
+            (!merged.isComplete || _status?.kind == 'subagent')) {
+          final active = _subagents
+              .where((task) => !task.isComplete)
+              .lastOrNull;
+          _status = active == null
+              ? null
+              : GatewayTurnStatus(kind: 'subagent', text: active.goal);
+        }
       }
       _notify();
       return;
@@ -865,6 +874,7 @@ class NormalGatewayChatOwner {
         ? _display.last
         : null;
     if (reasoning != null && assistant != null) {
+      _status = const GatewayTurnStatus(kind: 'reasoning', text: '');
       _timeline = _timeline.reasoning(
         assistant['_normal_projection_id']!,
         reasoning,
@@ -877,6 +887,7 @@ class NormalGatewayChatOwner {
           assistant['_gateway_reasoning_replaces'] == true ||
           reasoning.mode == GatewayReasoningEventMode.replace;
     } else if (event.type == 'message.start' && assistant != null) {
+      _status = null;
       assistant.remove('_gateway_interim_boundary');
     } else if (event.type == 'message.delta' && assistant != null) {
       final token = event.data['text']?.toString() ?? '';
@@ -887,6 +898,7 @@ class NormalGatewayChatOwner {
       );
       _status = null;
     } else if (event.type == 'message.interim' && assistant != null) {
+      _status = null;
       final transition = GatewayInterimTransition.resolve(
         currentText: assistant['content']?.toString() ?? '',
         interimText: event.data['text']?.toString() ?? '',
@@ -909,6 +921,7 @@ class NormalGatewayChatOwner {
         });
       }
     } else if (event.type == 'message.complete' && assistant != null) {
+      _status = null;
       final text =
           event.data['rendered']?.toString() ??
           event.data['text']?.toString() ??
@@ -930,6 +943,7 @@ class NormalGatewayChatOwner {
           );
         }
         target['_gateway_pending_response'] = false;
+        target['_chat_response_complete'] = true;
       }
     } else if (event.type.startsWith('tool.')) {
       final update = GatewayToolActivity.fromGatewayEvent(
@@ -955,6 +969,9 @@ class NormalGatewayChatOwner {
           _tools[index] = _tools[index].merge(update);
         }
         final activity = index < 0 ? _tools.last : _tools[index];
+        if (!activity.isTerminal || _status?.kind == 'tool') {
+          _status = GatewayTurnStatus.forRunningTool(_tools);
+        }
         if (assistant != null) {
           _timeline = _timeline.tool(
             assistant['_normal_projection_id']!,

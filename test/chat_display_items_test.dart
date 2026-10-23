@@ -21,6 +21,7 @@ void main() {
   group('buildChatDisplayItems', () {
     test('keeps user and assistant prose in order with display content', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'user', 'content': 'question'},
           {'role': 'assistant', 'content': 'answer'},
@@ -38,6 +39,7 @@ void main() {
 
     test('normalizes persisted agent replies to assistant bubbles', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'user', 'content': 'question'},
           {'role': 'agent', 'content': 'answer'},
@@ -52,6 +54,7 @@ void main() {
 
     test('tags each assistant reply with the last user prompt for retry', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'user', 'content': 'first'},
           {'role': 'assistant', 'content': 'reply one'},
@@ -70,6 +73,7 @@ void main() {
 
     test('never attaches a retry prompt before the first user message', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'assistant', 'content': 'unsolicited'},
         ],
@@ -83,6 +87,7 @@ void main() {
 
     test('drops messages that are neither user nor assistant', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'system', 'content': 'you are Hermes'},
           {'role': 'assistant', 'content': 'answer'},
@@ -95,6 +100,7 @@ void main() {
 
     test('drops messages with no text and no reasoning', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'assistant', 'content': ''},
           {'role': 'assistant', 'content': 'answer'},
@@ -110,6 +116,7 @@ void main() {
 
     test('replaces a tool result message with the matching activity card', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'user', 'content': 'run it'},
           {'role': 'tool', 'content': 'raw output'},
@@ -127,6 +134,7 @@ void main() {
 
     test('groups consecutive tool results into a single card', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'tool', 'content': 'first'},
           {'role': 'tool', 'content': 'second'},
@@ -155,6 +163,7 @@ void main() {
           timestamp: null,
         );
         final items = buildChatDisplayItems(
+          verbose: true,
           messages: [
             {
               'id': 41,
@@ -189,6 +198,7 @@ void main() {
         lastActivityTimeSource: GatewayToolTimeSource.storedResult,
       );
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: const [],
         toolActivities: [later, earlier, _tool('unknown')],
       );
@@ -201,6 +211,7 @@ void main() {
       'suppresses a tool result bubble even without a matching activity',
       () {
         final items = buildChatDisplayItems(
+          verbose: true,
           messages: [
             {'role': 'tool', 'content': 'orphan output'},
             {'role': 'assistant', 'content': 'done'},
@@ -217,6 +228,7 @@ void main() {
 
     test('appends tool activities that never matched a stored message', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'assistant', 'content': 'streaming'},
         ],
@@ -234,6 +246,7 @@ void main() {
     test('leaves the caller list untouched while consuming activities', () {
       final activities = [_tool('terminal')];
       buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'tool', 'content': 'output'},
         ],
@@ -250,6 +263,7 @@ void main() {
     // ships today so that rework is a visible, deliberate change.
     test('drops assistant prose that embeds a raw tool result block', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {
             'role': 'assistant',
@@ -271,6 +285,7 @@ void main() {
       'strips a trailing tool result block when the role is not tool-like',
       () {
         final items = buildChatDisplayItems(
+          verbose: true,
           messages: [
             {'role': 'assistant', 'content': 'plain answer'},
           ],
@@ -285,6 +300,7 @@ void main() {
 
     test('emits a reasoning item before the assistant bubble', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {
             'role': 'assistant',
@@ -303,6 +319,7 @@ void main() {
 
     test('keeps reasoning visible when the message is still text-free', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {
             'role': 'assistant',
@@ -318,6 +335,7 @@ void main() {
 
     test('ignores reasoning attached to a user message', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {
             'role': 'user',
@@ -331,7 +349,7 @@ void main() {
       expect(items.single, isA<Map<String, dynamic>>());
     });
 
-    test('expands reasoning in verbose mode', () {
+    test('keeps reasoning collapsed in verbose mode', () {
       final items = buildChatDisplayItems(
         messages: [
           {
@@ -343,11 +361,12 @@ void main() {
         verbose: true,
       );
 
-      expect((items[0] as ChatReasoningItem).initiallyExpanded, isTrue);
+      expect((items[0] as ChatReasoningItem).initiallyExpanded, isFalse);
     });
 
-    test('expands reasoning the gateway marked verbose', () {
+    test('gateway verbose hints do not expand reasoning', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {
             'role': 'assistant',
@@ -358,11 +377,12 @@ void main() {
         ],
       );
 
-      expect((items[0] as ChatReasoningItem).initiallyExpanded, isTrue);
+      expect((items[0] as ChatReasoningItem).initiallyExpanded, isFalse);
     });
 
     test('flushes a pending tool card before a reasoning item', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'tool', 'content': 'output'},
           {
@@ -381,6 +401,7 @@ void main() {
 
     test('orders subagents after messages and notices last', () {
       final items = buildChatDisplayItems(
+        verbose: true,
         messages: [
           {'role': 'assistant', 'content': 'answer'},
         ],
@@ -395,7 +416,7 @@ void main() {
     });
 
     test('returns nothing for an empty conversation', () {
-      expect(buildChatDisplayItems(messages: const []), isEmpty);
+      expect(buildChatDisplayItems(verbose: true, messages: const []), isEmpty);
     });
   });
 }

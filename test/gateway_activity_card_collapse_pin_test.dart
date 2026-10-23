@@ -190,14 +190,16 @@ void main() {
     expect(find.text('2 completed'), findsOneWidget);
   });
 
-  testWidgets('verbose explicitly opens the card without counting as a tap', (
+  testWidgets('verbose starts closed and preserves a manual expansion', (
     tester,
   ) async {
     await _pumpCard(tester, [_finished('terminal', 'call-1')], verbose: true);
+    expect(_isExpanded(tester), isFalse);
+    await _tapHeader(tester);
     expect(_isExpanded(tester), isTrue);
 
     await _pumpCard(tester, [_finished('terminal', 'call-1')]);
-    expect(_isExpanded(tester), isFalse);
+    expect(_isExpanded(tester), isTrue);
   });
 
   testWidgets('a collapsed failed call remains visible', (tester) async {

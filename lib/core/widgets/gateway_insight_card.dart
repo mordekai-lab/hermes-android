@@ -155,7 +155,7 @@ class GatewaySubagentCard extends StatelessWidget {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: ExpansionTile(
-        initiallyExpanded: !complete,
+        initiallyExpanded: false,
         leading: Icon(
           activities.any((task) => task.failed)
               ? Icons.error_outline

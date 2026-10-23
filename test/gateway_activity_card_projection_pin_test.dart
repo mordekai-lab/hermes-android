@@ -56,6 +56,7 @@ class _ChatListState extends State<_ChatList> {
   @override
   Widget build(BuildContext context) {
     final items = buildChatDisplayItems(
+      verbose: true,
       messages: widget.turn.messages,
       toolActivities: widget.turn.toolActivities,
     );
@@ -129,10 +130,12 @@ void main() {
 
   test('the group keeps its id when the projection moves it down the list', () {
     final before = buildChatDisplayItems(
+      verbose: true,
       messages: turnToolsOnly.messages,
       toolActivities: turnToolsOnly.toolActivities,
     );
     final after = buildChatDisplayItems(
+      verbose: true,
       messages: turnWithText.messages,
       toolActivities: turnWithText.toolActivities,
     );
@@ -147,10 +150,12 @@ void main() {
 
   test('the id is stable while the group grows', () {
     final first = buildChatDisplayItems(
+      verbose: true,
       messages: turnToolsOnly.messages,
       toolActivities: streamingTools,
     ).whereType<ChatToolActivityGroup>().single;
     final grown = buildChatDisplayItems(
+      verbose: true,
       messages: turnToolsOnly.messages,
       toolActivities: [
         _running('terminal', 'call-1'),
@@ -167,11 +172,13 @@ void main() {
       phase: GatewayToolActivityPhase.running,
     );
     final before = buildChatDisplayItems(
+      verbose: true,
       messages: [_userMessage('go')],
       toolActivities: [started],
     ).whereType<ChatToolActivityGroup>().single;
     final updated = started.merge(_finished('terminal', 'call-late'));
     final after = buildChatDisplayItems(
+      verbose: true,
       messages: [_userMessage('go')],
       toolActivities: [updated],
     ).whereType<ChatToolActivityGroup>().single;
@@ -187,10 +194,12 @@ void main() {
       phase: GatewayToolActivityPhase.running,
     );
     final before = buildChatDisplayItems(
+      verbose: true,
       messages: [row],
       toolActivities: [started],
     ).whereType<ChatToolActivityGroup>().single;
     final after = buildChatDisplayItems(
+      verbose: true,
       messages: [row],
       toolActivities: [started.merge(_finished('terminal', 'call-late'))],
     ).whereType<ChatToolActivityGroup>().single;
@@ -205,6 +214,7 @@ void main() {
       final old = {'id': 11, 'role': 'tool', 'content': 'old result'};
       final retained = {'id': 14, 'role': 'tool', 'content': 'new result'};
       final firstPage = buildChatDisplayItems(
+        verbose: true,
         messages: [old, _assistantMessage('old done'), retained],
         toolActivities: [
           _finished('terminal', null),
@@ -214,6 +224,7 @@ void main() {
       pins.pin(firstPage.last.id, false);
 
       final laterPage = buildChatDisplayItems(
+        verbose: true,
         messages: [
           retained,
           _assistantMessage('new done'),
@@ -234,6 +245,7 @@ void main() {
 
   test('unanchored groups never reuse an older name-based pin', () {
     final first = buildChatDisplayItems(
+      verbose: true,
       messages: [_userMessage('go')],
       toolActivities: [
         GatewayToolActivity(
@@ -244,6 +256,7 @@ void main() {
     ).whereType<ChatToolActivityGroup>().single;
     pins.pin(first.id, true);
     final next = buildChatDisplayItems(
+      verbose: true,
       messages: [_userMessage('next')],
       toolActivities: [
         GatewayToolActivity(

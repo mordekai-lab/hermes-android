@@ -24,7 +24,7 @@ import 'package:hermes_android/core/services/delegated_task_history.dart';
 import 'package:hermes_android/core/widgets/delegated_task_timeline.dart';
 
 void main() {
-  setUp(() => SharedPreferences.setMockInitialValues({'verbose_mode': false}));
+  setUp(() => SharedPreferences.setMockInitialValues({'verbose_mode': true}));
 
   for (final (following, width) in [
     (true, 400.0),
@@ -235,7 +235,14 @@ void main() {
       remote.event('tool.start', {'tool': 'read_file', 'tool_id': 'call-1'});
       expect(controller.hasActiveTurn, isTrue);
       await _open(tester, controller, remote, id: 'stored-chat');
-      expect(find.textContaining('Continued while absent.'), findsOneWidget);
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is MessageBubble &&
+              widget.content.contains('Continued while absent.'),
+        ),
+        findsOneWidget,
+      );
       expect(remote.submissions, 1);
       expect(find.byTooltip('Stop response'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -358,6 +365,8 @@ void main() {
   testWidgets(
     'canonical reopen replaces completed wire presentation after delayed persistence',
     (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('verbose_mode', false);
       final controller = GatewayTurnApplicationController();
       addTearDown(controller.close);
       final remote = _Remote();
