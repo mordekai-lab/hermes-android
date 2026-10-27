@@ -5,6 +5,8 @@ import 'package:crypto/crypto.dart';
 
 import '../models/connection.dart';
 import 'desktop_gateway_client.dart';
+import 'clarify_attachment_owner.dart';
+import 'ws_client.dart';
 import 'gateway_turn_coordinator.dart';
 import 'gateway_turn_journal.dart';
 import 'gateway_turn_recovery.dart';
@@ -404,7 +406,7 @@ class GatewayTurnApplicationController {
 }
 
 class _CoordinatorGatewayTurnApplicationSession
-    implements GatewayTurnApplicationSession {
+    implements GatewayTurnApplicationSession, ClarifyAttachmentOwner {
   final DesktopGatewayClient _client;
   final Map<String, _ApplicationAsyncEventRegistration> _asyncEventListeners =
       {};
@@ -537,6 +539,30 @@ class _CoordinatorGatewayTurnApplicationSession
       questionId: questionId,
     );
     return true;
+  }
+
+  @override
+  bool canAttachToClarify({
+    required String requestId,
+    required String questionId,
+  }) =>
+      !_closed &&
+      _client.canAttachToClarify(requestId: requestId, questionId: questionId);
+
+  @override
+  Future<RemoteFileAttachment> attachToClarify({
+    required String requestId,
+    required String questionId,
+    required String name,
+    required String dataUrl,
+  }) {
+    _requireOpen();
+    return _client.attachToClarify(
+      requestId: requestId,
+      questionId: questionId,
+      name: name,
+      dataUrl: dataUrl,
+    );
   }
 
   @override

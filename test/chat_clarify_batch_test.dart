@@ -2,12 +2,17 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:hermes_android/core/screens/chat_screen.dart';
+import 'package:hermes_android/core/models/attachment_draft.dart';
+import 'package:hermes_android/core/services/attachment_draft_service.dart';
+import 'package:hermes_android/core/services/clarify_attachment_owner.dart';
+import 'package:hermes_android/core/services/image_picker_recovery_guard.dart';
 import 'package:hermes_android/core/services/connection_manager.dart';
 import 'package:hermes_android/core/services/desktop_gateway_client.dart';
 import 'package:hermes_android/core/services/gateway_turn_application_controller.dart';
@@ -21,7 +26,8 @@ import 'support/fake_voice_composer_adapter.dart';
 /// Mimics the production transport's batch-clarify behaviour: locking one
 /// answer emits `clarify.remaining` before the response future completes
 /// (see `DesktopGatewayClient.respondToClarify`).
-class _BatchClarifySession implements GatewayTurnApplicationSession {
+class _BatchClarifySession
+    implements GatewayTurnApplicationSession, ClarifyAttachmentOwner {
   @override
   bool get hasActiveTurn => false;
 
@@ -31,9 +37,39 @@ class _BatchClarifySession implements GatewayTurnApplicationSession {
   @override
   void removeTurnActivityListener(Object token) {}
 
-  _BatchClarifySession(this.emit);
+  _BatchClarifySession(this.emit, {this.withImages = false});
 
   final void Function(StreamEvent event) emit;
+  final bool withImages;
+  final uploads = <({String requestId, String questionId, String name})>[];
+  Completer<RemoteFileAttachment>? heldUpload;
+
+  @override
+  bool canAttachToClarify({
+    required String requestId,
+    required String questionId,
+  }) => withImages && _open[requestId]?.contains(questionId) == true;
+
+  @override
+  Future<RemoteFileAttachment> attachToClarify({
+    required String requestId,
+    required String questionId,
+    required String name,
+    required String dataUrl,
+  }) async {
+    uploads.add((requestId: requestId, questionId: questionId, name: name));
+    expect(dataUrl, 'data:image/png;base64,AQIDBA==');
+    return heldUpload?.future ??
+        Future.value(
+          const RemoteFileAttachment(
+            name: '画面 shot.png',
+            path: '/host/profiles/work/attachments/画面 shot.png',
+            refText: '@file:"attachments/画面 shot.png"',
+            uploaded: true,
+          ),
+        );
+  }
+
   final Map<String, Set<String>> _open = {};
   final List<({String requestId, String? questionId, String answer})> answers =
       [];
@@ -192,12 +228,54 @@ class _BatchClarifySession implements GatewayTurnApplicationSession {
 
 const _sessionId = 'batch-clarify-session';
 
+class _ClarifyDrafts extends AttachmentDraftService {
+  final removed = <AttachmentDraft>[];
+  int preparations = 0;
+  @override
+  Future<AttachmentDraft> prepareImage({
+    required String sourcePath,
+    required String displayName,
+    required Iterable<AttachmentDraft> existingDrafts,
+    required AttachmentDraftMode mode,
+  }) async {
+    preparations++;
+    return AttachmentDraft(
+      id: 'clarify-image',
+      cachedPath: '/unused/clarify.png',
+      name: displayName,
+      byteLength: 4,
+      mediaType: 'image/png',
+      kind: AttachmentDraftKind.image,
+      sanitized: true,
+    );
+  }
+
+  @override
+  Future<String> readDataUrl(AttachmentDraft draft) async =>
+      'data:image/png;base64,AQIDBA==';
+
+  @override
+  Future<void> removeCachedFile(AttachmentDraft draft) async {
+    removed.add(draft);
+  }
+}
+
 Future<(_BatchClarifySession, TestDesktopAsyncEventHook)> _pumpChat(
-  WidgetTester tester,
-) async {
-  SharedPreferences.setMockInitialValues({'verbose_mode': false});
+  WidgetTester tester, {
+  bool withImages = false,
+  AttachmentDraftService? drafts,
+  String? composerText,
+  Map<String, Object> preferences = const {},
+}) async {
+  SharedPreferences.setMockInitialValues({
+    'verbose_mode': false,
+    ...preferences,
+  });
   final hook = TestDesktopAsyncEventHook();
-  final session = _BatchClarifySession((event) => hook.handler?.call(event));
+  final session = _BatchClarifySession(
+    (event) => hook.handler?.call(event),
+    withImages: withImages,
+  );
 
   await tester.pumpWidget(
     MaterialApp(
@@ -225,6 +303,8 @@ Future<(_BatchClarifySession, TestDesktopAsyncEventHook)> _pumpChat(
         testVoiceComposerAdapter: FakeVoiceComposerAdapter(),
         testDesktopAsyncEventHook: hook,
         testTurnApplicationSession: session,
+        testAttachmentDraftService: drafts,
+        initialComposerText: composerText,
         testApiClient: ApiClient(
           baseUrl: 'https://fixture.invalid',
           apiKey: 'fixture-key',
@@ -323,6 +403,211 @@ void _deliverApproval(TestDesktopAsyncEventHook hook) {
 }
 
 void main() {
+  for (final clarificationOrigin in [true, false]) {
+    testWidgets(
+      'lost picker result routes safely (clarification=$clarificationOrigin)',
+      (tester) async {
+        const channel = MethodChannel('plugins.flutter.io/image_picker');
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        messenger.setMockMethodCallHandler(
+          channel,
+          (call) async => call.method == 'retrieve'
+              ? {
+                  'type': 'image',
+                  'path': '/picker/recovered.png',
+                  'pathList': ['/picker/recovered.png'],
+                }
+              : null,
+        );
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        final drafts = _ClarifyDrafts();
+        final (session, _) = await _pumpChat(
+          tester,
+          drafts: drafts,
+          composerText: 'Unsent draft',
+          preferences: {
+            if (clarificationOrigin)
+              ImagePickerRecoveryGuard.pendingClarifyKey:
+                  '{"purpose":"clarify","owner":"other-connection/old-chat/request:q1","token":"old-process"}',
+          },
+        );
+        await _pumpFrames(tester, const Duration(milliseconds: 200));
+        expect(drafts.preparations, clarificationOrigin ? 0 : 1);
+        expect(
+          find.text('recovered.png'),
+          clarificationOrigin ? findsNothing : findsOneWidget,
+        );
+        expect(session.answers, isEmpty);
+        expect(session.uploads, isEmpty);
+        final composer = tester.widget<TextField>(
+          find.byKey(const Key('chat-message-composer')),
+        );
+        expect(composer.controller!.text, 'Unsent draft');
+        final prefs = await SharedPreferences.getInstance();
+        expect(
+          prefs.containsKey(ImagePickerRecoveryGuard.pendingClarifyKey),
+          isFalse,
+        );
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
+
+  testWidgets(
+    'lost picker failure stays fail-closed without startup exception',
+    (tester) async {
+      const channel = MethodChannel('plugins.flutter.io/image_picker');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'retrieve') {
+          throw PlatformException(code: 'unavailable');
+        }
+        return null;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final drafts = _ClarifyDrafts();
+      await _pumpChat(
+        tester,
+        drafts: drafts,
+        preferences: {
+          ImagePickerRecoveryGuard.pendingClarifyKey:
+              'old-clarification-marker',
+        },
+      );
+      await _pumpFrames(tester, const Duration(milliseconds: 200));
+      expect(drafts.preparations, 0);
+      expect(
+        (await SharedPreferences.getInstance()).getString(
+          ImagePickerRecoveryGuard.pendingClarifyKey,
+        ),
+        'old-clarification-marker',
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'chat question uploads through its owner without touching composer',
+    (tester) async {
+      const channel = MethodChannel('plugins.flutter.io/image_picker');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async =>
+            call.method == 'pickMultiImage' ? ['/picker/画面 shot.png'] : null,
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final (session, hook) = await _pumpChat(
+        tester,
+        withImages: true,
+        drafts: _ClarifyDrafts(),
+        composerText: 'Unsent draft',
+      );
+      session.openBatch('r1', ['q1', 'q2']);
+      _deliverBatchQuestion(hook);
+      await _pumpFrames(tester, const Duration(milliseconds: 200));
+      final pick = find.byKey(const Key('clarify-choose-images'));
+      await tester.ensureVisible(pick);
+      await tester.tap(pick);
+      await _pumpFrames(tester);
+      expect(session.uploads, isEmpty);
+      await tester.tap(find.byKey(const Key('clarify-continue')));
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      expect(session.uploads, [
+        (requestId: 'r1', questionId: 'q1', name: '画面 shot.png'),
+      ]);
+      expect(session.answers.single.requestId, 'r1');
+      expect(session.answers.single.questionId, 'q1');
+      expect(
+        session.answers.single.answer,
+        '@file:"attachments/画面 shot.png"\n'
+        'Attached image path: "/host/profiles/work/attachments/画面 shot.png"\n'
+        'Use vision_analyze with image_url set to this path to inspect the image.',
+      );
+      expect(find.text('Second question?'), findsOneWidget);
+      expect(find.text('画面 shot.png'), findsNothing);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('clarify-continue')))
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byKey(const Key('clarify-skip')));
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      final composer = tester.widget<TextField>(
+        find.byKey(const Key('chat-message-composer')),
+      );
+      expect(composer.controller!.text, 'Unsent draft');
+      expect(session.answers.last.answer, '');
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'cancelled image upload leaves a later question unanswered and open',
+    (tester) async {
+      const channel = MethodChannel('plugins.flutter.io/image_picker');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async =>
+            call.method == 'pickMultiImage' ? ['/picker/screenshot.png'] : null,
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final (session, hook) = await _pumpChat(
+        tester,
+        withImages: true,
+        drafts: _ClarifyDrafts(),
+      );
+      final upload = Completer<RemoteFileAttachment>();
+      session.heldUpload = upload;
+      session.openBatch('r1', ['q1', 'q2']);
+      _deliverBatchQuestion(hook);
+      await _pumpFrames(tester, const Duration(milliseconds: 200));
+      final pick = find.byKey(const Key('clarify-choose-images'));
+      await tester.ensureVisible(pick);
+      await tester.tap(pick);
+      await _pumpFrames(tester);
+      await tester.tap(find.byKey(const Key('clarify-continue')));
+      await _pumpFrames(tester);
+      expect(session.uploads, hasLength(1));
+      expect(session.answers, isEmpty);
+      _deliverRequestCancel(hook, 'r1');
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      session.openBatch('r2', ['q1']);
+      _deliverSingleQuestion(
+        hook,
+        requestId: 'r2',
+        qid: 'q1',
+        question: 'Later question?',
+      );
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      upload.complete(
+        const RemoteFileAttachment(
+          name: 'late.png',
+          path: '/host/late.png',
+          refText: '@file:/host/late.png',
+          uploaded: true,
+        ),
+      );
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      expect(session.answers, isEmpty);
+      expect(find.text('Later question?'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('clarify-choice-0')));
+      await _pumpFrames(tester);
+      await tester.tap(find.byKey(const Key('clarify-continue')));
+      await _pumpFrames(tester, const Duration(milliseconds: 300));
+      expect(session.answers.single.requestId, 'r2');
+      expect(session.answers.single.answer, 'Later A');
+      expect(find.byType(ChatScreen), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('cancelled clarify below approval leaves approval open', (
     tester,
   ) async {

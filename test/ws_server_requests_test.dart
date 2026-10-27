@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hermes_android/core/models/connection.dart';
+import 'package:hermes_android/core/services/clarify_attachment_owner.dart';
 import 'package:hermes_android/core/services/connection_mutation_barrier.dart';
 import 'package:hermes_android/core/services/desktop_gateway_client.dart';
 import 'package:hermes_android/core/services/gateway_turn_application_controller.dart';
@@ -11,6 +12,466 @@ import 'package:hermes_android/core/services/gateway_turn_journal.dart';
 import 'package:hermes_android/core/services/ws_client.dart';
 
 void main() {
+  for (final withTurnRecovery in [false, true]) {
+    final ownerName = withTurnRecovery ? 'recovery-v2 owner' : 'Desktop owner';
+    group('$ownerName request-bound clarify images', () {
+      late _ServerRequestGateway gateway;
+      late ClarifyAttachmentOwner owner;
+      late List<StreamEvent> events;
+      late Future<bool> Function({
+        required String requestId,
+        required String answer,
+        String? questionId,
+      })
+      respond;
+      final expectedSocketCount = withTurnRecovery ? 2 : 1;
+      const name = 'screen "λ".png';
+      const dataUrl =
+          'data:image/png;base64,'
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8'
+          '/x8AAwMCAO+aF9sAAAAASUVORK5CYII=';
+      const path = '/srv/hermes/work/uploads/screen "λ"\\line\nshot.png';
+      const refText = r'  @file:/srv/hermes/uploads/raw "λ"\ref.png  ';
+
+      setUp(() async {
+        gateway = await _ServerRequestGateway.start(
+          withDashboardAuth: true,
+          withTurnRecovery: withTurnRecovery,
+        );
+        addTearDown(gateway.stop);
+        gateway.fileAttachResult = {
+          'attached': true,
+          'uploaded': true,
+          'name': name,
+          'path': path,
+          'ref_text': refText,
+        };
+        final connection = SavedConnection(
+          id: 'clarify-image-$withTurnRecovery',
+          label: 'Clarify image fixture',
+          host: '127.0.0.1',
+          port: gateway.port,
+          apiKey: 'fixture-key',
+          dashboardPortOverride: gateway.port,
+          dashboardUsername: 'user',
+          dashboardPassword: 'pass',
+          gatewayProfile: 'work',
+        );
+        final receivedEvents = <StreamEvent>[];
+        events = receivedEvents;
+        if (withTurnRecovery) {
+          final controller = GatewayTurnApplicationController(
+            journalFactory: () =>
+                GatewayTurnJournal(store: _MemoryJournalStore()),
+          );
+          addTearDown(controller.close);
+          // Exercise the default private application wrapper, not a fake
+          // session factory or a separately constructed Desktop client.
+          final session = controller.sessionFor(connection);
+          expect(session, isA<ClarifyAttachmentOwner>());
+          owner = session as ClarifyAttachmentOwner;
+          respond = session.tryRespondToClarify;
+          for (final localSessionId in ['mobile-1', 'mobile-2']) {
+            session.setAsyncEventListener(
+              localSessionId,
+              (_, event) => receivedEvents.add(event),
+            );
+            await session.submit(
+              localSessionId: localSessionId,
+              text: 'Start $localSessionId',
+            );
+          }
+          // Two private sockets/runtimes make an accidental control-socket
+          // upload or delegation to the latest session observable.
+          expect(gateway.socketCount, expectedSocketCount);
+        } else {
+          final client = DesktopGatewayClient.fromConnection(connection);
+          addTearDown(client.close);
+          // Disable only the independent background reconnect policy. The
+          // upload itself must still never reconnect/resume/create on failure.
+          client.setReconnectAllowed(false);
+          client.setAsyncEventListener((_, event) => receivedEvents.add(event));
+          owner = client;
+          respond =
+              ({
+                required String requestId,
+                required String answer,
+                String? questionId,
+              }) async {
+                await client.respondToClarify(
+                  requestId: requestId,
+                  questionId: questionId,
+                  answer: answer,
+                );
+                return true;
+              };
+          await client.ensureSession('mobile-1');
+        }
+      });
+
+      Future<String> request({
+        String wireId = 'image-clarify',
+        List<Map<String, dynamic>> questions = const [
+          {'qid': 'q1', 'question': 'Send a screenshot?'},
+        ],
+        Map<String, String> answers = const {},
+      }) async {
+        final eventOffset = events.length;
+        gateway.sendServerRequest(
+          id: wireId,
+          method: 'clarify',
+          params: {
+            'session_id': 'runtime-1',
+            'questions': questions,
+            if (answers.isNotEmpty) 'answers': answers,
+          },
+        );
+        await _waitFor(
+          () => events
+              .skip(eventOffset)
+              .any((event) => event.type == 'clarify.request'),
+        );
+        return events
+            .skip(eventOffset)
+            .firstWhere((event) => event.type == 'clarify.request')
+            .data['request_id']
+            .toString();
+      }
+
+      void expectOnlyMethodsSince(int offset, List<String> methods) {
+        expect(gateway.socketCount, expectedSocketCount);
+        expect(
+          gateway.clientFrames
+              .skip(offset)
+              .where((entry) => entry.frame['method'] != null)
+              .map((entry) => entry.frame['method']),
+          orderedEquals(methods),
+        );
+      }
+
+      test('uploads then locks on original socket/runtime/profile', () async {
+        final requestId = await request();
+        final frameOffset = gateway.clientFrames.length;
+        expect(
+          owner.canAttachToClarify(requestId: requestId, questionId: 'q1'),
+          isTrue,
+        );
+        final attachment = await owner.attachToClarify(
+          requestId: requestId,
+          questionId: 'q1',
+          name: name,
+          dataUrl: dataUrl,
+        );
+        expect(attachment.name, name);
+        expect(attachment.path, path);
+        expect(attachment.refText, refText);
+        expect(attachment.uploaded, isTrue);
+        expect(gateway.fileAttachments.single, {
+          'session_id': 'runtime-1',
+          'profile': 'work',
+          'name': name,
+          'path': '',
+          'data_url': dataUrl,
+        });
+        expect(gateway.fileAttachSocketIndexes, [0]);
+        expect(gateway.clarifyLocks, isEmpty);
+        expectOnlyMethodsSince(frameOffset, ['file.attach']);
+
+        // Clarify results are not prompts: preserve the opaque reference and
+        // JSON-quote the path, including quotes, backslash and LF.
+        final reference = clarifyImageReference(attachment);
+        expect(reference, startsWith('$refText\n'));
+        expect(
+          reference,
+          contains('Attached image path: ${jsonEncode(path)}\n'),
+        );
+        expect(reference, contains('vision_analyze'));
+        expect(reference, contains('image_url'));
+        final answer = 'Look at this screenshot.\n$reference';
+        expect(
+          await respond(requestId: requestId, questionId: 'q1', answer: answer),
+          isTrue,
+        );
+        expect(gateway.clarifyLocks.single, {
+          'request_id': 'image-clarify',
+          'question_id': 'q1',
+          'answer': answer,
+          'profile': 'work',
+        });
+        expect(gateway.clarifyLockSocketIndexes, [0]);
+        expectOnlyMethodsSince(frameOffset, ['file.attach', 'clarify.lock']);
+        expect(
+          owner.canAttachToClarify(requestId: requestId, questionId: 'q1'),
+          isFalse,
+        );
+        expect(gateway.serverResponses, isNot(contains('image-clarify')));
+      });
+
+      test('refuses unknown requests and invalid/locked qids', () async {
+        final requestId = await request(
+          wireId: 'partial-clarify',
+          questions: const [
+            {'qid': 'locked', 'question': 'Already answered?'},
+            {'qid': 'q1', 'question': 'First image?'},
+            {'qid': 'q2', 'question': 'Second image?'},
+          ],
+          answers: const {'locked': 'Previously supplied'},
+        );
+        gateway.sendServerRequest(
+          id: 'not-a-clarification',
+          method: 'secret',
+          params: {
+            'session_id': 'runtime-1',
+            'env_var': 'TOKEN',
+            'prompt': 'Token',
+          },
+        );
+        await _waitFor(
+          () => events.any((event) => event.type == 'secret.request'),
+        );
+        final secretId = events
+            .lastWhere((event) => event.type == 'secret.request')
+            .data['request_id']
+            .toString();
+        final frameOffset = gateway.clientFrames.length;
+        for (final invalid in [
+          (requestId: 'unknown-request', qid: 'q1'),
+          (requestId: 'partial-clarify', qid: 'q1'),
+          (requestId: secretId, qid: 'q1'),
+          (requestId: requestId, qid: 'unknown-qid'),
+          (requestId: requestId, qid: ''),
+          (requestId: requestId, qid: ' q1 '),
+          (requestId: requestId, qid: 'locked'),
+        ]) {
+          expect(
+            owner.canAttachToClarify(
+              requestId: invalid.requestId,
+              questionId: invalid.qid,
+            ),
+            isFalse,
+          );
+          await expectLater(
+            owner.attachToClarify(
+              requestId: invalid.requestId,
+              questionId: invalid.qid,
+              name: name,
+              dataUrl: dataUrl,
+            ),
+            throwsStateError,
+          );
+        }
+        expectOnlyMethodsSince(frameOffset, []);
+        expect(
+          await respond(
+            requestId: requestId,
+            questionId: 'q1',
+            answer: 'First answer',
+          ),
+          isTrue,
+        );
+        expect(
+          owner.canAttachToClarify(requestId: requestId, questionId: 'q2'),
+          isTrue,
+        );
+        expect(
+          owner.canAttachToClarify(requestId: requestId, questionId: 'q1'),
+          isFalse,
+        );
+        await expectLater(
+          owner.attachToClarify(
+            requestId: requestId,
+            questionId: 'q1',
+            name: name,
+            dataUrl: dataUrl,
+          ),
+          throwsStateError,
+        );
+        expect(gateway.fileAttachments, isEmpty);
+        expectOnlyMethodsSince(frameOffset, ['clarify.lock']);
+      });
+
+      for (final ending in [
+        'cancellation',
+        'replacement',
+        'lock',
+        'disconnect',
+      ]) {
+        test('held upload cannot outlive request $ending', () async {
+          final wireId = ending == 'lock' ? 'partial-clarify' : 'image-clarify';
+          final requestId = await request(
+            wireId: wireId,
+            questions: [
+              {'qid': 'q1', 'question': 'Send a screenshot?'},
+              if (ending == 'lock') {'qid': 'q2', 'question': 'Next image?'},
+            ],
+          );
+          final frameOffset = gateway.clientFrames.length;
+          gateway.holdFileAttachResponses = true;
+          var settled = false;
+          // Observe errors immediately, including socket-close rejection, so
+          // the intentionally suspended operation never leaks an async error.
+          final upload = owner
+              .attachToClarify(
+                requestId: requestId,
+                questionId: 'q1',
+                name: name,
+                dataUrl: dataUrl,
+              )
+              .then<Object>(
+                (attachment) {
+                  settled = true;
+                  return attachment;
+                },
+                onError: (Object error) {
+                  settled = true;
+                  return error;
+                },
+              );
+          await _waitFor(() => gateway.heldFileAttachResponseCount == 1);
+          expect(gateway.fileAttachments, hasLength(1));
+          expect(gateway.fileAttachSocketIndexes, [0]);
+          expect(settled, isFalse);
+          expect(
+            owner.canAttachToClarify(requestId: requestId, questionId: 'q1'),
+            isTrue,
+          );
+          String? replacementId;
+          switch (ending) {
+            case 'cancellation':
+              gateway.sendEvent(
+                type: 'request.cancel',
+                sessionId: 'runtime-1',
+                payload: {'id': wireId, 'method': 'clarify'},
+              );
+              await _waitFor(
+                () => events.any(
+                  (event) =>
+                      event.type == 'request.cancel' &&
+                      event.data['id'] == requestId,
+                ),
+              );
+              break;
+            case 'replacement':
+              replacementId = await request(
+                wireId: wireId,
+                questions: const [
+                  {'qid': 'q1', 'question': 'A different screenshot?'},
+                ],
+              );
+              expect(replacementId, isNot(requestId));
+              expect(requestId, endsWith(':$wireId'));
+              expect(replacementId, endsWith(':$wireId'));
+              expect(
+                owner.canAttachToClarify(
+                  requestId: replacementId,
+                  questionId: 'q1',
+                ),
+                isTrue,
+              );
+              break;
+            case 'lock':
+              expect(
+                await respond(
+                  requestId: requestId,
+                  questionId: 'q1',
+                  answer: 'Answered on another route',
+                ),
+                isTrue,
+              );
+              expect(
+                owner.canAttachToClarify(
+                  requestId: requestId,
+                  questionId: 'q2',
+                ),
+                isTrue,
+              );
+              break;
+            case 'disconnect':
+              await gateway.closeSocket(0);
+              await _waitFor(
+                () => events.any(
+                  (event) =>
+                      event.type == 'request.cancel' &&
+                      event.data['id'] == requestId,
+                ),
+              );
+              break;
+          }
+          expect(
+            owner.canAttachToClarify(requestId: requestId, questionId: 'q1'),
+            isFalse,
+          );
+          if (ending != 'disconnect') expect(settled, isFalse);
+          gateway.holdFileAttachResponses = false;
+          gateway.releaseFileAttachResponses();
+          final outcome = await upload.timeout(const Duration(seconds: 5));
+          if (ending == 'disconnect') {
+            expect(
+              outcome,
+              isA<JsonRpcError>()
+                  .having((error) => error.method, 'method', 'file.attach')
+                  .having(
+                    (error) => error.reason,
+                    'reason',
+                    'connection_closed',
+                  ),
+            );
+          } else {
+            expect(outcome, isA<StateError>());
+          }
+          expect(gateway.heldFileAttachResponseCount, 0);
+          await expectLater(
+            owner.attachToClarify(
+              requestId: requestId,
+              questionId: 'q1',
+              name: name,
+              dataUrl: dataUrl,
+            ),
+            throwsStateError,
+          );
+          expectOnlyMethodsSince(frameOffset, [
+            'file.attach',
+            if (ending == 'lock') 'clarify.lock',
+          ]);
+          expect(gateway.serverResponses, isNot(contains(wireId)));
+
+          if (replacementId != null) {
+            // A rejected late result must neither consume nor poison the new
+            // authority, even when socket, runtime, qid and wire ID are reused.
+            final attachment = await owner.attachToClarify(
+              requestId: replacementId,
+              questionId: 'q1',
+              name: name,
+              dataUrl: dataUrl,
+            );
+            final answer = clarifyImageReference(attachment);
+            expect(
+              await respond(
+                requestId: replacementId,
+                questionId: 'q1',
+                answer: answer,
+              ),
+              isTrue,
+            );
+            expect(gateway.fileAttachSocketIndexes, [0, 0]);
+            expect(gateway.clarifyLockSocketIndexes, [0]);
+            expect(gateway.clarifyLocks.single, {
+              'request_id': wireId,
+              'question_id': 'q1',
+              'answer': answer,
+              'profile': 'work',
+            });
+            expectOnlyMethodsSince(frameOffset, [
+              'file.attach',
+              'file.attach',
+              'clarify.lock',
+            ]);
+          }
+        });
+      }
+    });
+  }
+
   test(
     'closed recovery owner detach cannot reject a same-ID replacement request',
     () async {
@@ -1055,17 +1516,25 @@ class _ServerRequestGateway {
   final bool withTurnRecovery;
   final List<Map<String, dynamic>>? openRequestsOnResume;
   final List<WebSocket> _sockets = [];
+  final List<({int socketIndex, Map<String, dynamic> frame})> clientFrames = [];
   final List<Map<String, dynamic>> capabilityFrames = [];
   final Map<String, Map<String, dynamic>> serverResponses = {};
   final Map<String, int> serverResponseSocketIndexes = {};
   final Set<String> serverResponseSocketKeys = {};
   final List<Map<String, dynamic>> clarifyLocks = [];
   final List<int> clarifyLockSocketIndexes = [];
+  final List<Map<String, dynamic>> fileAttachments = [];
+  final List<int> fileAttachSocketIndexes = [];
+  Map<String, dynamic> fileAttachResult = {};
+  bool holdFileAttachResponses = false;
+  final List<({WebSocket socket, Object? id, Map<String, dynamic> result})>
+  _heldFileAttachResponses = [];
   bool reuseSessionIdentity = false;
   void Function(int, Map<String, dynamic>)? onServerResponse;
 
   int get port => _server.port;
   int get socketCount => _sockets.length;
+  int get heldFileAttachResponseCount => _heldFileAttachResponses.length;
 
   static Future<_ServerRequestGateway> start({
     bool withDashboardAuth = false,
@@ -1135,6 +1604,7 @@ class _ServerRequestGateway {
   void _handleSocketFrame(WebSocket socket, dynamic raw) {
     final frame = Map<String, dynamic>.from(jsonDecode(raw as String) as Map);
     final socketIndex = _sockets.indexOf(socket);
+    clientFrames.add((socketIndex: socketIndex, frame: frame));
     final method = frame['method'];
     final id = frame['id'];
     if (method == null && id is String) {
@@ -1197,6 +1667,17 @@ class _ServerRequestGateway {
       });
       return;
     }
+    if (method == 'file.attach') {
+      fileAttachments.add(Map<String, dynamic>.from(frame['params'] as Map));
+      fileAttachSocketIndexes.add(socketIndex);
+      final result = Map<String, dynamic>.from(fileAttachResult);
+      if (holdFileAttachResponses) {
+        _heldFileAttachResponses.add((socket: socket, id: id, result: result));
+      } else {
+        _respond(socket, id, result);
+      }
+      return;
+    }
     if (method == 'clarify.lock') {
       final params = Map<String, dynamic>.from(frame['params'] as Map);
       clarifyLocks.add(params);
@@ -1232,6 +1713,31 @@ class _ServerRequestGateway {
     );
   }
 
+  void sendEvent({
+    required String type,
+    required String sessionId,
+    required Map<String, dynamic> payload,
+    int socketIndex = 0,
+  }) {
+    _sockets[socketIndex].add(
+      jsonEncode({
+        'jsonrpc': '2.0',
+        'method': 'event',
+        'params': {'type': type, 'session_id': sessionId, 'payload': payload},
+      }),
+    );
+  }
+
+  void releaseFileAttachResponses() {
+    final held = _heldFileAttachResponses.toList();
+    _heldFileAttachResponses.clear();
+    for (final response in held) {
+      if (response.socket.readyState == WebSocket.open) {
+        _respond(response.socket, response.id, response.result);
+      }
+    }
+  }
+
   Future<void> closeSocket(int socketIndex) =>
       _sockets[socketIndex].close(WebSocketStatus.goingAway, 'fixture close');
 
@@ -1250,6 +1756,7 @@ class _ServerRequestGateway {
   }
 
   Future<void> stop() async {
+    _heldFileAttachResponses.clear();
     for (final socket in _sockets) {
       await socket.close();
     }

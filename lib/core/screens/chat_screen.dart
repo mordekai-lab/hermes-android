@@ -23,6 +23,8 @@ import '../widgets/delegated_task_timeline.dart';
 import '../widgets/delegated_task_labels.dart';
 import '../services/connection_manager.dart';
 import '../services/attachment_draft_service.dart';
+import '../services/clarify_attachment_owner.dart';
+import '../services/image_picker_recovery_guard.dart';
 import '../services/chat_presentation_state.dart';
 import '../services/chat_model_override_store.dart';
 import '../services/chat_density_preference.dart';
@@ -2967,8 +2969,23 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _recoverLostImage() async {
-    final response = await _imagePicker.retrieveLostData();
-    if (response.isEmpty) return;
+    LostDataResponse? response;
+    try {
+      response = await ImagePickerRecoveryGuard.recoverForComposer(
+        _imagePicker.retrieveLostData,
+      );
+    } catch (_) {
+      // A failed purpose read/recovery must not guess which draft owns the
+      // image, or leak an unhandled asynchronous startup exception.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _showAttachmentError(
+          context.l10n.image_selection_was_interrupted_try_again,
+        );
+      });
+      return;
+    }
+    if (response == null || response.isEmpty) return;
 
     final files = response.files;
     if (files == null || files.isEmpty) {
@@ -5194,6 +5211,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         return;
       }
 
+      final questionId = pending.request.questionId;
+      ClarifyAttachmentOwner? attachmentOwner;
+      if (questionId != null) {
+        // Recovery-v2 requests can belong to a different socket from the
+        // normal chat. Capture the actual request owner, not a session lookup.
+        for (final candidate in [_turnApplicationSession, desktopGateway]) {
+          if (candidate is ClarifyAttachmentOwner &&
+              candidate.canAttachToClarify(
+                requestId: pending.request.requestId,
+                questionId: questionId,
+              )) {
+            attachmentOwner = candidate;
+            break;
+          }
+        }
+      }
+      final owner = attachmentOwner;
+      final account = _historyAccountKey;
+      bool ownsRequest() =>
+          mounted &&
+          account == _historyAccountKey &&
+          pending.responseGeneration == _responseGeneration &&
+          _ownsClarifyPromptRoute(pending.request);
       _clarifyPromptRouteOpen = true;
       final responded = await showDialog<bool>(
         context: context,
@@ -5204,7 +5244,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
             request: pending.request,
             onRespond: (answer) =>
                 _answerClarifyPrompt(pending.request, answer),
-            canCloseRoute: () => _ownsClarifyPromptRoute(pending.request),
+            onUploadImage: owner == null
+                ? null
+                : ({required draft, required dataUrl}) async {
+                    if (!ownsRequest()) {
+                      throw StateError('The clarification is no longer active');
+                    }
+                    final attachment = await owner.attachToClarify(
+                      requestId: pending.request.requestId,
+                      questionId: questionId!,
+                      name: draft.name,
+                      dataUrl: dataUrl,
+                    );
+                    return AttachmentUploadReceipt(
+                      refText: clarifyImageReference(attachment),
+                    );
+                  },
+            attachmentDraftService: _attachmentDraftService,
+            imagePickerOwner: jsonEncode([
+              widget.connection.id,
+              _normalLocalSessionKey,
+              pending.request.identityKey,
+            ]),
+            canCloseRoute: ownsRequest,
           );
         },
       );

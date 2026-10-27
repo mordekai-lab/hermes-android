@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import '../models/client_certificate.dart';
 import 'capability_registry.dart';
+import 'clarify_attachment_owner.dart';
 import 'connection_manager.dart';
 import 'gateway_turn_coordinator.dart';
 import 'gateway_turn_journal.dart';
@@ -30,7 +31,7 @@ enum DesktopConnectionState {
 /// The mobile OpenAI-compatible endpoint remains available for legacy
 /// profiles. When a connection supplies [SavedConnection.desktopGatewayUrl],
 /// chat writes and interactive events use this one Desktop session transport.
-class DesktopGatewayClient {
+class DesktopGatewayClient implements ClarifyAttachmentOwner {
   // Native action payloads can outlive this process. A process-local counter
   // would collide after restart and could approve a replayed wire request id.
   final String _serverRequestNamespace = const Uuid().v4();
@@ -1115,6 +1116,46 @@ class DesktopGatewayClient {
     }
     final client = _connectedClient();
     await client.respondToSecret(requestId: requestId, value: value);
+  }
+
+  @override
+  bool canAttachToClarify({
+    required String requestId,
+    required String questionId,
+  }) {
+    final request = _serverRequests[requestId];
+    return !_closed &&
+        request?.method == 'clarify' &&
+        _serverRequestClients[requestId]?.isConnected == true &&
+        (request!.params['session_id']?.toString().isNotEmpty ?? false) &&
+        _serverClarifyRemaining[requestId]?.contains(questionId) == true;
+  }
+
+  @override
+  Future<RemoteFileAttachment> attachToClarify({
+    required String requestId,
+    required String questionId,
+    required String name,
+    required String dataUrl,
+  }) async {
+    if (!canAttachToClarify(requestId: requestId, questionId: questionId)) {
+      throw StateError('The clarification is no longer active');
+    }
+    final request = _serverRequests[requestId]!;
+    final client = _serverRequestClients[requestId]!;
+    // Deliberately bypass _callSessionScoped: a reconnect/resume/create could
+    // upload into a different runtime from the question the user is answering.
+    final attachment = await client.attachFile(
+      sessionId: request.params['session_id'].toString(),
+      name: name,
+      dataUrl: dataUrl,
+    );
+    if (!identical(_serverRequests[requestId], request) ||
+        !identical(_serverRequestClients[requestId], client) ||
+        !canAttachToClarify(requestId: requestId, questionId: questionId)) {
+      throw StateError('The clarification ended while the image was uploading');
+    }
+    return attachment;
   }
 
   Future<void> respondToClarify({

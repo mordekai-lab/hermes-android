@@ -6,6 +6,19 @@ shows only the three latest releases.
 
 ## [Unreleased]
 
+### Added
+
+- Agent question popups can attach images from the gallery or camera, with
+  thumbnails, removal and image-only answers. Uploads use the question's existing
+  Remote Gateway session and do not start another turn or alter the chat draft.
+- Failed image uploads and answers can be retried without repeating confirmed
+  uploads. Skip discards the selected images; cancelled questions cannot send a
+  late answer. See [Answering with images](docs/clarification-images.md) for
+  gateway and vision-tool compatibility limits.
+- Clarification picker results recovered after Android process death are
+  discarded, not added to a normal composer in another chat. Ordinary composer
+  image recovery is preserved.
+
 ## [3.0.2] - 2026-10-27
 
 Release identity is `3.0.2+3006`, with production APK codes `30061`, `30062` and

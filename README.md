@@ -118,6 +118,11 @@ rows and offers Retry rather than claiming the archive is empty.
 
 ## Chat guidance and shared files
 
+- **Images in agent questions (unreleased):** in supported Remote Gateway
+  question popups, use **Choose images** or **Take photo**, optionally add text,
+  then **Continue**. Selected images can be removed before sending. See
+  [Answering with images](docs/clarification-images.md) for supported gateways,
+  limits and retry behaviour.
 - **Send while Hermes is working:** the composer keeps separate **Stop** and
   **Send** buttons. Remote Gateway sends text as guidance for the current run
   without interrupting it. Legacy REST uses an explicitly labelled **Stop and
