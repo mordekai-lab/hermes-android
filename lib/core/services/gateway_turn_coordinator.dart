@@ -1990,6 +1990,8 @@ bool _readyFailureAllowsLegacy(
   }
   final payload = params['payload'];
   if (payload is! Map<String, dynamic>) return false;
+  // Canonical session handlers need their own adapter, not classic fallback.
+  if (payload['session_authority'] == true) return false;
   final protocol = payload['protocol'];
   switch (failure) {
     case GatewayTurnCapabilityFailure.missingProtocol:
@@ -2044,6 +2046,7 @@ bool _readyLacksRecoveryContractCleanly(
   }
   final payload = params['payload'];
   if (payload is! Map<String, dynamic>) return false;
+  if (payload['session_authority'] == true) return false;
   if (!payload.containsKey('protocol')) return true;
   final capabilities = payload['capabilities'];
   return capabilities is Map<String, dynamic> &&
