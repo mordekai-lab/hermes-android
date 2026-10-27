@@ -983,7 +983,17 @@ class GatewayTurnCoordinator {
     // authority is checked before permitting normal-transport fallback.
     final loadReady = readyFrameLoader;
     if (loadReady != null) {
-      final readyFrame = await loadReady();
+      final Map<String, dynamic> readyFrame;
+      try {
+        readyFrame = await loadReady();
+      } on GatewayTurnCoordinatorException {
+        rethrow;
+      } catch (_) {
+        _requireOperational();
+        throw const GatewayTurnCoordinatorException(
+          GatewayTurnCoordinatorFailure.transportUnavailable,
+        );
+      }
       _requireOperational();
       await _requireRecoveryCapability(readyFrame, previous);
       _requireOperational();

@@ -532,10 +532,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void>? _initialTurnRecovery;
   bool _initialTurnRecoveryComplete = false;
   bool _legacyTransportFallback = false;
+  bool _hasExperimentalResponsePresentation = false;
   bool _stockGatewayFallback = false;
 
   /// View-only admission gate; all reconnect work belongs to the app owner.
-  bool get _pendingReattachResync => _normalChat?.snapshot.reconciling ?? false;
+  bool get _pendingReattachResync =>
+      _usesNormalInputOwner && (_normalChat?.snapshot.reconciling ?? false);
 
   /// Backstop for [releaseClientAfterStreamSettles] on the dispose path: a
   /// stream that never settles must not hold this screen's HTTP client open
@@ -802,12 +804,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     bool followStream = true,
   }) {
     if (!mounted) return;
-    final rejectedDraft = snapshot.rejectedDraft;
-    if (rejectedDraft != null &&
-        widget.initialComposerText == null &&
-        _composerRevision == _clearedComposerRevision) {
-      _restoreComposerAfterRejectedSend(rejectedDraft);
-    }
     _normalInputUpdatesSeen.retainAll(snapshot.inputUpdates);
     final updatedInputIds = <String>{};
     for (final event in snapshot.inputUpdates) {
@@ -822,50 +818,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         (event) => '${event.type}:${jsonEncode(event.data)}',
       ),
     );
-    _normalAuxiliarySeen.retainAll(snapshot.auxiliaryEvents);
-    for (final event in snapshot.auxiliaryEvents) {
-      if (_normalAuxiliarySeen.add(event)) {
-        _handleDesktopAsyncEvent(widget.session.id, event);
-      }
-    }
     _normalSnapshot =
         snapshot; // read-only owner projection, not a route buffer
-    _retainedRecoveryOutcomeIds.retainAll(
-      snapshot.receivedOutcomes.map((outcome) => outcome.id),
-    );
-    _historyObservedRecoveryOutcomeIds.retainAll(
-      snapshot.receivedOutcomes.map((outcome) => outcome.id),
-    );
-    final justDetached =
-        _desktopConnectionState == DesktopConnectionState.connected &&
-        snapshot.connectionState != DesktopConnectionState.connected &&
-        snapshot.wireEmitted &&
-        snapshot.hasActiveTurn;
-    if (justDetached &&
-        _normalTurnId != null &&
-        ModalRoute.of(context)?.isCurrent == true) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            context
-                .l10n
-                .connection_switched_the_running_reply_continues_on_the_server_and,
-          ),
-          persist: false,
-        ),
-      );
-    }
-    final newTurn = snapshot.turnId != _normalTurnId;
-    if (newTurn) {
-      _normalTurnId = snapshot.turnId;
-      _responseGeneration++;
-      _normalInputSeen.clear();
-      _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
-    }
     final bindingChanged =
         snapshot.storedSessionId != null &&
         _storedSessionId != snapshot.storedSessionId;
-    _storedSessionId = snapshot.storedSessionId;
+    if (snapshot.storedSessionId != null || _usesNormalInputOwner) {
+      _storedSessionId = snapshot.storedSessionId;
+    }
     if (bindingChanged) {
       unawaited(_refreshProjectName());
       unawaited(_refreshArchiveState());
@@ -907,6 +867,72 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _normalPendingRequestIds
       ..clear()
       ..addAll(pendingIds);
+    final owner = _normalChat;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          !identical(owner, _normalChat) ||
+          ModalRoute.of(context)?.isCurrent != true) {
+        return;
+      }
+      final currentInputs =
+          owner?.snapshot.pendingInput ?? const <StreamEvent>[];
+      for (final event in snapshot.pendingInput) {
+        if (!currentInputs.contains(event)) continue;
+        final key = '${event.type}:${jsonEncode(event.data)}';
+        if (_normalInputSeen.add(key)) {
+          _handleDesktopGatewayEvent(event, _responseGeneration);
+        }
+      }
+    });
+    final justDetached =
+        _desktopConnectionState == DesktopConnectionState.connected &&
+        snapshot.connectionState != DesktopConnectionState.connected &&
+        snapshot.wireEmitted &&
+        snapshot.hasActiveTurn;
+    setState(() => _desktopConnectionState = snapshot.connectionState);
+    // Control observation and exact-socket interactive requests remain live,
+    // but only the selected response owner may project transcript or effects.
+    // This includes retained terminal/failed output, not just active flags.
+    if (!_usesNormalInputOwner) return;
+    if (justDetached &&
+        _normalTurnId != null &&
+        ModalRoute.of(context)?.isCurrent == true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            context
+                .l10n
+                .connection_switched_the_running_reply_continues_on_the_server_and,
+          ),
+          persist: false,
+        ),
+      );
+    }
+    if (snapshot.turnId != _normalTurnId) {
+      _normalTurnId = snapshot.turnId;
+      _responseGeneration++;
+      _normalInputSeen.clear();
+      _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
+    }
+    final generation = _responseGeneration;
+    final rejectedDraft = snapshot.rejectedDraft;
+    if (rejectedDraft != null &&
+        widget.initialComposerText == null &&
+        _composerRevision == _clearedComposerRevision) {
+      _restoreComposerAfterRejectedSend(rejectedDraft);
+    }
+    _normalAuxiliarySeen.retainAll(snapshot.auxiliaryEvents);
+    for (final event in snapshot.auxiliaryEvents) {
+      if (_normalAuxiliarySeen.add(event)) {
+        _handleDesktopAsyncEvent(widget.session.id, event);
+      }
+    }
+    _retainedRecoveryOutcomeIds.retainAll(
+      snapshot.receivedOutcomes.map((outcome) => outcome.id),
+    );
+    _historyObservedRecoveryOutcomeIds.retainAll(
+      snapshot.receivedOutcomes.map((outcome) => outcome.id),
+    );
     // Only this admission's received assistant scopes can create unread work.
     // Imported donors and saved rows are not new current output.
     final lastPrompt = snapshot.displayRows.lastIndexWhere(
@@ -931,37 +957,32 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
     }
     setState(() {
-      _desktopConnectionState = snapshot.connectionState;
       if (snapshot.turnId != null || snapshot.displayRows.isNotEmpty) {
         _loading = false;
       }
-      // The normal socket also carries recovery capability negotiation. Its
-      // idle/control notifications do not own an experimental draft's send
-      // admission, active stream or fail-closed status.
-      if (_usesNormalInputOwner) {
-        _sending = snapshot.hasActiveTurn && !snapshot.reconciling;
-        _streaming =
-            snapshot.hasActiveTurn &&
-            !snapshot.reconciling &&
-            snapshot.phase != NormalGatewayTurnPhase.preparing;
-        _activeResponseTransport = snapshot.hasActiveTurn
-            ? _ResponseTransport.desktop
-            : _ResponseTransport.none;
-        _gatewayTurnStatus = snapshot.reconciling
-            ? const GatewayTurnStatus(
-                kind: 'recovery',
-                text: 'Recovering without resending',
-              )
-            : snapshot.status;
-      }
+      _sending = snapshot.hasActiveTurn && !snapshot.reconciling;
+      _streaming =
+          snapshot.hasActiveTurn &&
+          !snapshot.reconciling &&
+          snapshot.phase != NormalGatewayTurnPhase.preparing;
+      _activeResponseTransport = snapshot.hasActiveTurn
+          ? _ResponseTransport.desktop
+          : _ResponseTransport.none;
+      _gatewayTurnStatus = snapshot.reconciling
+          ? const GatewayTurnStatus(
+              kind: 'recovery',
+              text: 'Recovering without resending',
+            )
+          : snapshot.status;
       if (hydrateHistory) {
         // Finish synchronous owner fan-out before merging into the retained
         // window: another subscriber can accept a newer snapshot reentrantly.
         // An idle owner provides rows only; physical route pages still own the
         // paging cursor, including during a held older/latest request.
-        final owner = _normalChat;
         scheduleMicrotask(() {
           if (!mounted ||
+              !_usesNormalInputOwner ||
+              generation != _responseGeneration ||
               !identical(owner, _normalChat) ||
               !identical(_normalSnapshot, snapshot) ||
               _windowContainsLatest(_ownerHistoryForPresentation(snapshot))) {
@@ -1042,23 +1063,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       }
       _awaitingVoiceReply = false;
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || ModalRoute.of(context)?.isCurrent != true) return;
-      final currentInputs =
-          _normalChat?.snapshot.pendingInput ?? const <StreamEvent>[];
-      for (final event in snapshot.pendingInput) {
-        if (!currentInputs.contains(event)) continue;
-        final key = '${event.type}:${jsonEncode(event.data)}';
-        if (_normalInputSeen.add(key)) {
-          _handleDesktopGatewayEvent(event, _responseGeneration);
-        }
-      }
-    });
   }
 
   void _queuePersistedHistoryContext(NormalGatewayChatSnapshot snapshot) {
     final owner = _normalChat;
-    if (owner == null ||
+    if (!_usesNormalInputOwner ||
+        owner == null ||
         snapshot.hasActiveTurn ||
         _loading ||
         _sending ||
@@ -1075,9 +1085,13 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // invalidate a held scan without permanently suppressing its fresh retry.
     _persistedHistoryContextRequested = key;
     final flight = Object();
+    final generation = _responseGeneration;
     _persistedHistoryContextFlight = flight;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !identical(owner, _normalChat)) {
+      if (!mounted ||
+          !_usesNormalInputOwner ||
+          generation != _responseGeneration ||
+          !identical(owner, _normalChat)) {
         _finishPersistedHistoryContext(flight, invalidated: true);
         return;
       }
@@ -2116,8 +2130,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   void _scheduleScrollTarget(ChatScrollTarget? target) {
     if (_openTaskController != null || _receivedRecoverySheetOpen) return;
     final generation = _automaticScrollGeneration;
+    final responseGeneration = _responseGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!_canApplyAutomaticScroll(generation)) return;
+      if (!_canApplyAutomaticScroll(generation) ||
+          responseGeneration != _responseGeneration) {
+        return;
+      }
       if (target != null) {
         _applyScrollTarget(target);
       } else if (_scrollController.hasClients) {
@@ -2133,10 +2151,14 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     final generation = _automaticScrollGeneration;
+    final responseGeneration = _responseGeneration;
     _streamFollowScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _streamFollowScheduled = false;
-      if (!_canApplyAutomaticScroll(generation)) return;
+      if (!_canApplyAutomaticScroll(generation) ||
+          responseGeneration != _responseGeneration) {
+        return;
+      }
       final target = _scrollCoordinator.streamingContentChanged();
       if (target != null) {
         _applyScrollTarget(target);
@@ -2177,10 +2199,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     final generation = _automaticScrollGeneration;
+    final responseGeneration = _responseGeneration;
     _initialEndFrameScheduled = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initialEndFrameScheduled = false;
       if (!_canApplyAutomaticScroll(generation) ||
+          responseGeneration != _responseGeneration ||
           _initialEndFramesRemaining <= 0) {
         return;
       }
@@ -2577,6 +2601,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return;
     }
     _recoveringTurn = true;
+    final generation = _responseGeneration;
+    bool isCurrent() =>
+        mounted &&
+        identical(turnSession, _turnApplicationSession) &&
+        !_legacyTransportFallback &&
+        generation == _responseGeneration;
     if (mounted && !_streaming) {
       setState(() {
         _sending = true;
@@ -2589,9 +2619,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     try {
       final states = await turnSession.recoverPending(
         widget.session.id,
-        onState: _applyGatewayTurnState,
+        onState: (state) {
+          if (isCurrent()) _applyGatewayTurnState(state);
+        },
       );
-      if (!mounted) return;
+      if (!isCurrent()) return;
       for (final state in states) {
         _applyGatewayTurnState(state);
       }
@@ -2602,7 +2634,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         });
       }
     } catch (error) {
-      if (!mounted) return;
+      if (!isCurrent()) return;
       final fallback = classifyTurnRecoveryFailure(
         error,
         allowLegacyFallback: allowLegacyFallback,
@@ -2610,12 +2642,15 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (fallback == TurnRecoveryFallback.legacyTransport) {
         setState(() {
           _legacyTransportFallback = true;
+          _responseGeneration++;
           _stockGatewayFallback = turnRecoveryFailureIsStockGateway(error);
           _sending = false;
           _streaming = false;
           _gatewayTurnStatus = null;
           _activeResponseTransport = _ResponseTransport.none;
         });
+        final snapshot = _normalChat?.snapshot;
+        if (snapshot != null) _applyNormalSnapshot(snapshot);
         return;
       }
       setState(() {
@@ -2630,7 +2665,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   void _applyGatewayTurnState(GatewayTurnRecoveryState state) {
-    if (!mounted) return;
+    if (!mounted ||
+        _turnApplicationSession == null ||
+        _legacyTransportFallback) {
+      return;
+    }
+    _hasExperimentalResponsePresentation = true;
     final projection = GatewayTurnUiProjection.fromState(state);
     final messageIndex = _gatewayAssistantMessageIndex(projection);
     final shouldCreateMessage =
@@ -2768,7 +2808,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     List<Map<String, dynamic>> messages, {
     bool replacePresentation = true,
   }) {
-    final normal = _normalChat != null;
+    if (_hasExperimentalResponsePresentation && !_usesNormalInputOwner) return;
+    final normal = _usesNormalInputOwner;
     final liveRuns = !normal && !replacePresentation
         ? _timeline.runs
         : const <ChatTimelineRun>[];
@@ -4190,6 +4231,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       text,
       attachmentLabels,
     ].where((part) => part.trim().isNotEmpty).join('\n\n');
+    _hasExperimentalResponsePresentation = true;
     _commitComposerForSend();
     _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
     setState(() {
@@ -5779,7 +5821,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   String? get _currentActivityText {
-    final snapshot = _normalSnapshot;
+    final snapshot = _usesNormalInputOwner ? _normalSnapshot : null;
     if (snapshot != null) {
       if (!snapshot.hasActiveTurn ||
           snapshot.responseFailure != null ||
@@ -5802,7 +5844,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   String? get _terminalNoticeText {
-    final snapshot = _normalSnapshot;
+    final snapshot = _usesNormalInputOwner ? _normalSnapshot : null;
     if (snapshot?.responseFailure case final failure?) {
       return context.l10n.send_failed(failure);
     }
@@ -6135,9 +6177,38 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     );
   }
 
-  List<Map<String, dynamic>> _restHistoryForPresentation() =>
-      _restReplyRetention?.reconcile(_historyWindow.rows) ??
-      _historyWindow.rows;
+  List<Map<String, dynamic>> _restHistoryForPresentation() {
+    if (!_hasExperimentalResponsePresentation || _usesNormalInputOwner) {
+      return _restReplyRetention?.reconcile(_historyWindow.rows) ??
+          _historyWindow.rows;
+    }
+    // Normal/control observation is not a response handoff. Only a physical
+    // saved row at this successful response's explicit final_message_ref can
+    // replace the retained experimental transcript. Empty/unrelated history,
+    // idle state and text equality cannot establish correspondence.
+    final received = _lastAssistantMessage();
+    final reference = received?['_gateway_final_message_ref'];
+    final savedIndex = _historyWindow.rows.indexWhere(
+      (row) =>
+          reference != null &&
+          row['id'] == reference &&
+          const {'assistant', 'agent'}.contains(row['role']) &&
+          messageContentToText(row['content']).isNotEmpty,
+    );
+    if (_sending ||
+        _streaming ||
+        received?['_chat_response_complete'] != true ||
+        savedIndex < 0) {
+      return _messages;
+    }
+    final rows = List<Map<String, dynamic>>.of(_historyWindow.rows);
+    final saved = {...received!, ...rows[savedIndex]};
+    rows[savedIndex] = saved;
+    if (_timeline.scopes.contains(received)) {
+      _timeline = _timeline.reassignScope(received, saved);
+    }
+    return rows;
+  }
 
   List<ChatDisplaySection> _normalDisplaySections({bool? verbose}) =>
       buildNormalChatDisplaySections(
@@ -6154,6 +6225,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
 
   bool get _canFocusSavedRecovery =>
+      _usesNormalInputOwner &&
       _normalSnapshot?.hasActiveTurn == false &&
       _normalSnapshot!.receivedOutcomes.any(
         (fact) =>
@@ -6163,6 +6235,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
 
   bool _retainIdleRecoveryForPresentation() {
+    if (!_usesNormalInputOwner) return false;
     final snapshot = _normalSnapshot;
     if (snapshot == null || snapshot.hasActiveTurn) return false;
     final before = _retainedRecoveryOutcomeIds.length;
@@ -6454,9 +6527,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   }
 
   bool get _hasReceivedOutput =>
-      _normalSnapshot?.displayRows.isNotEmpty == true ||
-      _normalSnapshot?.timeline.runs.isNotEmpty == true ||
-      _normalSnapshot?.tools.isNotEmpty == true;
+      _usesNormalInputOwner &&
+      (_normalSnapshot?.displayRows.isNotEmpty == true ||
+          _normalSnapshot?.timeline.runs.isNotEmpty == true ||
+          _normalSnapshot?.tools.isNotEmpty == true);
 
   Widget _buildBody() {
     final hasReceived = _hasReceivedOutput;
@@ -6498,7 +6572,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       );
     }
 
-    final normal = _normalChat != null;
+    final normal = _usesNormalInputOwner;
     final recovery = normal ? _normalRecoveryProjection() : null;
     final retained = recovery?.retained;
     final sections = normal ? recovery!.sections : const <ChatDisplaySection>[];

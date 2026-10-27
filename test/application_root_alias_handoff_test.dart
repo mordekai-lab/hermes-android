@@ -29,6 +29,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'normal_gateway_alias_handoff_wire_test.dart'
     show BindingServer, widgetUntil;
 import 'support/memory_turn_journal_store.dart';
+import 'support/stock_chat_ready.dart';
 
 Finder _chatComposer() => find.descendant(
   of: find.byType(ChatScreen),
@@ -257,13 +258,7 @@ class _RootAliasFixture {
       tester,
       () => find.byType(ChatScreen).evaluate().isNotEmpty,
     );
-    await widgetUntil(
-      tester,
-      () => find
-          .byKey(const ValueKey('legacy-transport-notice'))
-          .evaluate()
-          .isNotEmpty,
-    );
+    await stockChatReady(tester, controller, connection);
     await _drain(tester);
     expect(find.byType(HermesApp), findsOneWidget);
     expect(find.byType(WorkspaceScreen, skipOffstage: false), findsOneWidget);

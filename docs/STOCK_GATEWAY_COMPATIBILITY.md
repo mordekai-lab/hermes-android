@@ -81,10 +81,18 @@ remains a separate dependency.[12]
    explicit Send. A held visible-history read cannot force the first prompt
    through an unnegotiated route, erase restored output, or later renegotiate
    over the admitted prompt. This does not make sending wait for that HTTP read.
-5. Normal/control notifications cannot overwrite the selected experimental
-   transport's active state or fail-closed send gate. Existing normal-chat
-   owners still own ordinary reconnect/history reconciliation and request
-   responses.
+5. Normal/control observation remains live for connection/binding metadata and
+   exact-socket interactive requests, but cannot project over the selected
+   experimental response. The boundary covers messages, reasoning/tool timeline,
+   subagent activity, rejected drafts, voice and scroll effects, including
+   retained terminal/fail-closed output. Deferred normal history and context
+   callbacks carry owner, mode and response-generation fences. A valid stock
+   fallback reselects and applies the current normal snapshot; reopening the
+   bound stored chat also restores ordinary normal history observation.
+   Physical history reads keep their existing authority. A successful
+   experimental response hands off only to its explicitly referenced saved
+   assistant row (`final_message_ref`), not empty/unrelated history or matching
+   prose. Failed/uncertain received output remains retained.
 6. Clean stock absence no longer produces a permanent banner, even in Verbose
    Mode. Genuine experimental mismatch/uncertainty remains visible and blocked
    as appropriate. No new visible strings or localization keys are introduced.
@@ -128,6 +136,24 @@ explicitly synthetic, not evidence that upstream implements Android v2.
 Related regressions retain server-request routing across separate recovery
 sockets, route remount, bounded large-session attach/history, stale-socket
 terminal fencing, reconnect resync and fail-closed coordinator/journal behavior.
+
+`test/experimental_response_ownership_test.dart` retains the independent
+reviewer's actual `message.start` / `message.delta` → control-only disconnect
+schedule and before/after exact-text assertions. It also covers selected active,
+completed, failed, fail-closed and socket-uncertain output through idle normal
+history and control reconnect, plus empty physical Refresh after settlement;
+already rendered history reasoning/tool cards stay intact. Those cards are
+saved-history fixtures, not a claim of live recovery-v2 reasoning/tool replay
+support. Later normal selection
+reuses the bound owner and accepts new normal observations; late first-turn
+frames cannot replace a newer experimental reply.
+
+Default-root alias/notification/teardown fixtures wait for the actual production
+control greeting and enabled composer rather than the intentionally removed
+stock failure banner. Their authority and cleanup assertions remain intact.
+Control-greeting transport/closed-socket failures become typed coordinator
+transport failures, never clean stock fallback or raw provider errors.
+
 The pre-change tree reproduces both the extra draft ticket mint and the
 permanent stock banner under the same regressions.
 

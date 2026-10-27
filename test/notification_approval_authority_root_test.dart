@@ -31,6 +31,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'normal_gateway_alias_handoff_wire_test.dart' show BindingServer;
 import 'support/memory_turn_journal_store.dart';
+import 'support/stock_chat_ready.dart';
 import 'support/inert_turn_application_session.dart';
 import 'package:hermes_android/core/services/notification_approval_authority.dart';
 import 'package:hermes_android/core/services/normal_gateway_application_session.dart';
@@ -392,13 +393,7 @@ class _RootAliasFixture {
       () => find.byType(ChatScreen).evaluate().isNotEmpty,
     );
     if (!injectedController) {
-      await widgetUntil(
-        tester,
-        () => find
-            .byKey(const ValueKey('legacy-transport-notice'))
-            .evaluate()
-            .isNotEmpty,
-      );
+      await stockChatReady(tester, controller, connection);
     }
     await _drain(tester);
     expect(find.byType(HermesApp), findsOneWidget);
