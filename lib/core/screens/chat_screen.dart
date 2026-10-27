@@ -56,6 +56,7 @@ import '../models/projects_tree_overview.dart';
 import '../services/tool_activity_group_pins.dart';
 import '../utils/chat_display_items.dart';
 import '../utils/chat_received_recovery_projection.dart';
+import '../utils/experimental_history_handoff.dart';
 import '../utils/chat_conversation_projection.dart';
 import '../models/chat_message_time.dart';
 import '../utils/rest_chat_reply_retention.dart';
@@ -533,6 +534,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   bool _initialTurnRecoveryComplete = false;
   bool _legacyTransportFallback = false;
   bool _hasExperimentalResponsePresentation = false;
+  final Map<Map<String, dynamic>, Map<String, dynamic>> _experimentalPrompts =
+      Map.identity();
   bool _stockGatewayFallback = false;
 
   /// View-only admission gate; all reconnect work belongs to the app owner.
@@ -1724,7 +1727,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
 
   Future<void> _exportConversation() async {
     final buffer = StringBuffer('# $_sessionTitle\n\n');
-    if (_normalChat != null) {
+    if (_usesNormalInputOwner) {
       for (final section in _normalDisplaySections(verbose: true)) {
         if (section.source == ChatDisplaySource.auxiliary) continue;
         final received = section.source == ChatDisplaySource.received;
@@ -1757,13 +1760,30 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       // Raw history can contain hidden/model-only rows and explicit empty
       // replacements; neither is permission to expose physical model content.
       for (final item in buildChatDisplayItems(messages: _messages)) {
-        if (item is Map<String, dynamic>) _writeExportMessage(buffer, item);
+        if (item is Map<String, dynamic>) {
+          if (_hasExperimentalResponsePresentation) {
+            buffer.writeln(
+              '## ${item['id'] == null ? context.l10n.received_output_heading : context.l10n.saved_history_heading}\n',
+            );
+            final outcome = _experimentalOutcomeLabel(item);
+            if (outcome != null) buffer.writeln('$outcome\n');
+          }
+          _writeExportMessage(buffer, item);
+        }
       }
     }
     await SharePlus.instance.share(
       ShareParams(subject: _sessionTitle, text: buffer.toString().trim()),
     );
   }
+
+  String? _experimentalOutcomeLabel(Map<String, dynamic> message) =>
+      switch (message['_gateway_response_outcome']) {
+        'failed' => context.l10n.turn_failed,
+        'unknown' => context.l10n.received_outcome_unknown,
+        'interrupted' => context.l10n.response_stopped,
+        _ => null,
+      };
 
   void _writeExportMessage(
     StringBuffer buffer,
@@ -2703,6 +2723,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         ..['_gateway_client_turn_id'] = projection.clientTurnId
         ..['_gateway_message_id'] = projection.messageId
         ..['_gateway_last_seq'] = projection.lastSeq
+        ..['_gateway_response_outcome'] = projection.isFailClosed
+            ? 'unknown'
+            : projection.status?.name
         ..['_gateway_pending_response'] = projection.isActive;
       if (projection.finalMessageRef != null) {
         message['_gateway_final_message_ref'] = projection.finalMessageRef;
@@ -2781,15 +2804,6 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (message['role'] == 'assistant' &&
           message['_gateway_pending_response'] == true) {
         return index;
-      }
-    }
-    if (projection.assistantText.isNotEmpty) {
-      for (var index = _messages.length - 1; index >= 0; index--) {
-        final message = _messages[index];
-        if (message['role'] == 'assistant' &&
-            message['content']?.toString() == projection.assistantText) {
-          return index;
-        }
       }
     }
     return null;
@@ -4231,6 +4245,19 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       text,
       attachmentLabels,
     ].where((part) => part.trim().isNotEmpty).join('\n\n');
+    final prompt = <String, dynamic>{
+      'role': 'user',
+      'content': localContent,
+      AndroidPromptContext.localUserTextKey: true,
+      ChatMessageTime.observedAtKey: DateTime.now().millisecondsSinceEpoch,
+      ChatMessageTime.sourceKey: 'sent',
+    };
+    final response = <String, dynamic>{
+      'role': 'assistant',
+      'content': '',
+      '_gateway_pending_response': true,
+    };
+    _experimentalPrompts[response] = prompt;
     _hasExperimentalResponsePresentation = true;
     _commitComposerForSend();
     _scrollCoordinator.beginStreaming(isNearEnd: _isNearEnd());
@@ -4241,18 +4268,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
         text: context.l10n.starting_hermes,
       );
       _attachmentDrafts.clear();
-      _messages.add({
-        'role': 'user',
-        'content': localContent,
-        AndroidPromptContext.localUserTextKey: true,
-        ChatMessageTime.observedAtKey: DateTime.now().millisecondsSinceEpoch,
-        ChatMessageTime.sourceKey: 'sent',
-      });
-      _messages.add({
-        'role': 'assistant',
-        'content': '',
-        '_gateway_pending_response': true,
-      });
+      _messages.addAll([prompt, response]);
     });
     _scheduleStreamingFollow();
 
@@ -4270,6 +4286,7 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (!mounted || responseGeneration != _responseGeneration) return;
       if (gatewayTurnSubmissionWasDefinitelyRejected(error)) {
         setState(() {
+          _experimentalPrompts.remove(response);
           if (_messages.isNotEmpty &&
               _messages.last['role'] == 'assistant' &&
               _messages.last['_gateway_pending_response'] == true) {
@@ -6182,32 +6199,18 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       return _restReplyRetention?.reconcile(_historyWindow.rows) ??
           _historyWindow.rows;
     }
-    // Normal/control observation is not a response handoff. Only a physical
-    // saved row at this successful response's explicit final_message_ref can
-    // replace the retained experimental transcript. Empty/unrelated history,
-    // idle state and text equality cannot establish correspondence.
-    final received = _lastAssistantMessage();
-    final reference = received?['_gateway_final_message_ref'];
-    final savedIndex = _historyWindow.rows.indexWhere(
-      (row) =>
-          reference != null &&
-          row['id'] == reference &&
-          const {'assistant', 'agent'}.contains(row['role']) &&
-          messageContentToText(row['content']).isNotEmpty,
+    if (_sending || _streaming) return _messages;
+    return reconcileExperimentalHistory(
+      received: _messages,
+      saved: _historyWindow.rows,
+      prompts: _experimentalPrompts,
+      handoff: (received, saved) {
+        if (_timeline.scopes.contains(received)) {
+          _timeline = _timeline.reassignScope(received, saved);
+        }
+        _experimentalPrompts.remove(received);
+      },
     );
-    if (_sending ||
-        _streaming ||
-        received?['_chat_response_complete'] != true ||
-        savedIndex < 0) {
-      return _messages;
-    }
-    final rows = List<Map<String, dynamic>>.of(_historyWindow.rows);
-    final saved = {...received!, ...rows[savedIndex]};
-    rows[savedIndex] = saved;
-    if (_timeline.scopes.contains(received)) {
-      _timeline = _timeline.reassignScope(received, saved);
-    }
-    return rows;
   }
 
   List<ChatDisplaySection> _normalDisplaySections({bool? verbose}) =>
@@ -6692,6 +6695,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     // its parent would discard the opening alignment or the reader's position.
     return Column(
       children: [
+        if (_hasExperimentalResponsePresentation && !normal)
+          for (final message in _messages)
+            if (_experimentalOutcomeLabel(message) case final String outcome)
+              if (outcome != _terminalTurnNotice)
+                Text(
+                  '$outcome · ${message['id'] == null ? context.l10n.received_output_badge : context.l10n.saved_history_heading}',
+                  key: ValueKey((
+                    'experimental-outcome',
+                    message['_gateway_client_turn_id'],
+                  )),
+                ),
         if (retained != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
