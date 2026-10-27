@@ -137,7 +137,7 @@ class GatewayTurnApplicationController {
   /// Legacy embedders without an injected root still get a process owner,
   /// never a socket whose lifetime is tied to a ChatScreen route.
   static final standalone = GatewayTurnApplicationController();
-  final GatewayTurnApplicationSessionFactory _sessionFactory;
+  late final GatewayTurnApplicationSessionFactory _sessionFactory;
   final OperationalActivityStore _activityStore;
   final Map<String, GatewayTurnApplicationSession> _sessions = {};
   final Map<String, Object?> _sessionMutations = {};
@@ -156,13 +156,17 @@ class GatewayTurnApplicationController {
     GatewayTurnApplicationSessionFactory? sessionFactory,
     GatewayTurnJournalFactory? journalFactory,
     OperationalActivityStore? activityStore,
-  }) : _activityStore = activityStore ?? OperationalActivityStore(),
-       _sessionFactory =
-           sessionFactory ??
-           ((connection) => _CoordinatorGatewayTurnApplicationSession(
-             DesktopGatewayClient.fromConnection(connection),
-             journal: journalFactory?.call(),
-           ));
+  }) : _activityStore = activityStore ?? OperationalActivityStore() {
+    _sessionFactory =
+        sessionFactory ??
+        ((connection) => _CoordinatorGatewayTurnApplicationSession(
+          DesktopGatewayClient.fromConnection(connection),
+          journal: journalFactory?.call(),
+          readyFrameLoader: normalSessionFor(
+            connection,
+          ).client!.readGatewayReadyFrame,
+        ));
+  }
 
   GatewayTurnApplicationSession sessionFor(SavedConnection connection) {
     if (_closed) throw StateError('Gateway turn application owner is closed.');
@@ -414,8 +418,12 @@ class _CoordinatorGatewayTurnApplicationSession
   _CoordinatorGatewayTurnApplicationSession(
     this._client, {
     GatewayTurnJournal? journal,
+    GatewayTurnReadyFrameLoader? readyFrameLoader,
   }) {
-    _registry = _client.enableTurnRecoveryCoordinator(journal: journal);
+    _registry = _client.enableTurnRecoveryCoordinator(
+      journal: journal,
+      readyFrameLoader: readyFrameLoader,
+    );
   }
 
   void _syncAsyncEventDispatcher() {

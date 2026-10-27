@@ -623,7 +623,7 @@ void main() {
   );
 
   testWidgets(
-    'stock gateway fallback shows the calm capability notice, not the failure banner',
+    'working stock transport has no permanent capability or failure banner',
     (tester) async {
       // Inspect transport diagnostics/raw recovered prose in Verbose mode.
       SharedPreferences.setMockInitialValues({'verbose_mode': true});
@@ -654,7 +654,11 @@ void main() {
         find.text(
           "This server doesn't offer background recovery — chats run live",
         ),
-        findsOneWidget,
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('legacy-transport-notice')),
+        findsNothing,
       );
       expect(
         find.text('Background recovery unavailable — legacy transport'),

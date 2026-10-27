@@ -37,10 +37,9 @@ TurnRecoveryFallback classifyTurnRecoveryFailure(
 /// cleanly does not offer the durable recovery contract (a stock Hermes
 /// server), rather than a v2 gateway that broke mid-negotiation.
 ///
-/// The UI uses this to draw an accurate "this server doesn't offer
-/// background recovery" notice instead of the failure-toned banner, so a
-/// stock-gateway user is not shown a permanent error for a state that is
-/// working exactly as designed.
+/// Clean stock absence is a supported normal JSON-RPC connection, not a
+/// permanent failure banner. This label must never suppress an unsafe or
+/// unresolved experimental recovery error.
 bool turnRecoveryFailureIsStockGateway(Object error) =>
     error is GatewayTurnCoordinatorException &&
     error.failure == GatewayTurnCoordinatorFailure.unsupportedCapability &&

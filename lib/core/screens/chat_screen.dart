@@ -529,6 +529,8 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   _ResponseTransport _activeResponseTransport = _ResponseTransport.none;
   String? _activeClientTurnId;
   bool _recoveringTurn = false;
+  Future<void>? _initialTurnRecovery;
+  bool _initialTurnRecoveryComplete = false;
   bool _legacyTransportFallback = false;
   bool _stockGatewayFallback = false;
 
@@ -933,20 +935,25 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       if (snapshot.turnId != null || snapshot.displayRows.isNotEmpty) {
         _loading = false;
       }
-      _sending = snapshot.hasActiveTurn && !snapshot.reconciling;
-      _streaming =
-          snapshot.hasActiveTurn &&
-          !snapshot.reconciling &&
-          snapshot.phase != NormalGatewayTurnPhase.preparing;
-      _activeResponseTransport = snapshot.hasActiveTurn
-          ? _ResponseTransport.desktop
-          : _ResponseTransport.none;
-      _gatewayTurnStatus = snapshot.reconciling
-          ? const GatewayTurnStatus(
-              kind: 'recovery',
-              text: 'Recovering without resending',
-            )
-          : snapshot.status;
+      // The normal socket also carries recovery capability negotiation. Its
+      // idle/control notifications do not own an experimental draft's send
+      // admission, active stream or fail-closed status.
+      if (_usesNormalInputOwner) {
+        _sending = snapshot.hasActiveTurn && !snapshot.reconciling;
+        _streaming =
+            snapshot.hasActiveTurn &&
+            !snapshot.reconciling &&
+            snapshot.phase != NormalGatewayTurnPhase.preparing;
+        _activeResponseTransport = snapshot.hasActiveTurn
+            ? _ResponseTransport.desktop
+            : _ResponseTransport.none;
+        _gatewayTurnStatus = snapshot.reconciling
+            ? const GatewayTurnStatus(
+                kind: 'recovery',
+                text: 'Recovering without resending',
+              )
+            : snapshot.status;
+      }
       if (hydrateHistory) {
         // Finish synchronous owner fan-out before merging into the retained
         // window: another subscriber can accept a newer snapshot reentrantly.
@@ -1441,7 +1448,22 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   Future<void> _initializeChat() async {
     await _fetchMessages();
     if (!mounted) return;
-    await _recoverPendingTurn(allowLegacyFallback: true);
+    await _ensureInitialTurnRecovery();
+  }
+
+  Future<void> _ensureInitialTurnRecovery() {
+    if (_turnApplicationSession == null) return Future<void>.value();
+    return _initialTurnRecovery ??= () async {
+      // A first send may negotiate before its visible history read returns.
+      // Share that exact flight with initialization, and fence the older read
+      // so it cannot erase restored recovery output or renegotiate over a send.
+      _responseGeneration++;
+      try {
+        await _recoverPendingTurn(allowLegacyFallback: true);
+      } finally {
+        _initialTurnRecoveryComplete = true;
+      }
+    }();
   }
 
   /// Desktop gateway connection-state transitions.
@@ -3574,6 +3596,29 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     _clearComposerForSend(text);
     try {
       await _sessionModelRestore;
+      if (_turnApplicationSession != null &&
+          !_legacyTransportFallback &&
+          !_initialTurnRecoveryComplete) {
+        await _ensureInitialTurnRecovery();
+        if (!mounted) return;
+        if (_sending || _streaming) {
+          // Recovery found existing work or failed closed. Preserve this
+          // unsent prompt rather than submitting into an uncertain session.
+          _restoreComposerAfterRejectedSend(text);
+          return;
+        }
+      }
+      // Initial negotiation may have selected stock transport while setup
+      // was suspended. Acquire its ordinary admission before any normal RPC.
+      if (_usesNormalInputOwner && _normalReservation == null) {
+        final reservation = _normalChat!.reserve();
+        if (reservation == null) {
+          _restoreComposerAfterRejectedSend(text);
+          return;
+        }
+        _normalReservation = reservation;
+      }
+      if (mounted) setState(() => _sending = true);
     } catch (error) {
       if (!mounted) return;
       _restoreComposerAfterRejectedSend(text);
@@ -5647,7 +5692,12 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               if (_verboseMode)
                 for (final notification in _gatewayNotifications.values)
                   _buildGatewayNotification(notification),
-              if (_verboseMode && _legacyTransportFallback)
+              // Normal stock JSON-RPC is a supported transport, not a
+              // permanently degraded connection. Keep real v2 mismatches
+              // visible without labelling clean capability absence a failure.
+              if (_verboseMode &&
+                  _legacyTransportFallback &&
+                  !_stockGatewayFallback)
                 Container(
                   key: const ValueKey('legacy-transport-notice'),
                   width: double.infinity,
@@ -5657,13 +5707,9 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     vertical: 10,
                   ),
                   child: Text(
-                    _stockGatewayFallback
-                        ? context
-                              .l10n
-                              .this_server_doesn_t_offer_background_recovery_chats_run_live
-                        : context
-                              .l10n
-                              .background_recovery_unavailable_legacy_transport,
+                    context
+                        .l10n
+                        .background_recovery_unavailable_legacy_transport,
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: Theme.of(context).colorScheme.onTertiaryContainer,

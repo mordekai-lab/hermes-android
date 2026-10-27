@@ -12,6 +12,7 @@ import 'gateway_turn_recovery.dart';
 import 'ws_client.dart';
 
 typedef GatewayTurnFreshSocketFactory = Future<WsClient> Function();
+typedef GatewayTurnReadyFrameLoader = Future<Map<String, dynamic>> Function();
 typedef GatewayTurnIdFactory = String Function();
 typedef GatewayTurnClock = DateTime Function();
 typedef GatewayTurnStateCallback =
@@ -131,6 +132,7 @@ class GatewayTurnCoordinatorRegistry {
   final GatewayTurnIdFactory uuidFactory;
   final GatewayTurnClock clock;
   final Map<String, GatewayTurnCoordinator> _coordinators = {};
+  final GatewayTurnReadyFrameLoader? readyFrameLoader;
   final Expando<bool> _leasedSockets = Expando<bool>();
   final Map<String, int> _sessionGenerations = {};
   final Map<String, _GatewayTurnSettledRegistration> _turnSettledListeners = {};
@@ -150,6 +152,7 @@ class GatewayTurnCoordinatorRegistry {
     required this.endpointDigest,
     required this.journal,
     required this.freshSocketFactory,
+    this.readyFrameLoader,
     GatewayTurnIdFactory? uuidFactory,
     GatewayTurnClock? clock,
   }) : uuidFactory = uuidFactory ?? const Uuid().v4,
@@ -287,6 +290,7 @@ class GatewayTurnCoordinatorRegistry {
                 localSessionId: localSessionId,
                 journal: journal,
                 freshSocketFactory: _leaseFreshSocket,
+                readyFrameLoader: readyFrameLoader,
                 uuidFactory: uuidFactory,
                 clock: clock,
               )
@@ -497,6 +501,7 @@ class GatewayTurnCoordinator {
   final GatewayTurnClock clock;
 
   final Map<String, GatewayTurnRecoveryState> _states = {};
+  final GatewayTurnReadyFrameLoader? readyFrameLoader;
   final Map<String, String> _clientTurnByTurnId = {};
   final Map<String, GatewayTurnStateCallback> _observers = {};
   final LinkedHashMap<String, GatewayTurnRecoveryState> _settledTombstones =
@@ -546,6 +551,7 @@ class GatewayTurnCoordinator {
     required this.localSessionId,
     required this.journal,
     required this.freshSocketFactory,
+    this.readyFrameLoader,
     required this.uuidFactory,
     required this.clock,
   }) {
@@ -970,6 +976,18 @@ class GatewayTurnCoordinator {
         : !_canonicalPersistedUuid(mobileSessionId)) {
       throw StateError('The coordinator mobile UUID is invalid.');
     }
+    // Negotiate on the app-owned normal session socket first. Stock Hermes
+    // needs no disposable recovery probe, and its pending server requests must
+    // remain on that live socket. This is not a cached recovery verdict: every
+    // attempt reads the current socket's immutable greeting. Pending durable
+    // authority is checked before permitting normal-transport fallback.
+    final loadReady = readyFrameLoader;
+    if (loadReady != null) {
+      final readyFrame = await loadReady();
+      _requireOperational();
+      await _requireRecoveryCapability(readyFrame, previous);
+      _requireOperational();
+    }
     final client = await freshSocketFactory();
     if (_usedSockets[client] == true) {
       throw StateError('The coordinator socket factory reused a transport.');
@@ -996,29 +1014,10 @@ class GatewayTurnCoordinator {
       await client.connect();
       _requireOperational();
       final readyFrame = await client.waitForGatewayReady();
-      final ready = GatewayTurnRecoveryCapability.fromGatewayReadyFrame(
-        readyFrame,
-      );
+      // A capable control socket is only permission to attempt recovery. The
+      // dedicated recovery socket must independently satisfy the same gate.
+      final ready = await _requireRecoveryCapability(readyFrame, previous);
       _requireOperational();
-      if (!_coordinatorCapabilitySupported(ready)) {
-        if (!_readyFailureAllowsLegacy(ready.failure, readyFrame)) {
-          throw const GatewayTurnCoordinatorException(
-            GatewayTurnCoordinatorFailure.invalidResponse,
-          );
-        }
-        final failure = await _unsupportedReadyFailure(previous);
-        // The clean-absence label must never ride along with pending
-        // durable turns: a stock gateway WITH pending turns is not a
-        // calm "server just doesn't offer recovery" state. The invariant
-        // is clean absence only.
-        final cleanAbsence =
-            failure == GatewayTurnCoordinatorFailure.unsupportedCapability &&
-            _readyLacksRecoveryContractCleanly(ready.failure, readyFrame);
-        throw GatewayTurnCoordinatorException(
-          failure,
-          stockGateway: cleanAbsence,
-        );
-      }
       final openResponse = await client.send('session.open', <String, dynamic>{
         'mobile_session_id': mobileSessionId,
       });
@@ -1078,6 +1077,31 @@ class GatewayTurnCoordinator {
       }
       Error.throwWithStackTrace(error, stack);
     }
+  }
+
+  Future<GatewayTurnRecoveryCapability> _requireRecoveryCapability(
+    Map<String, dynamic> readyFrame,
+    GatewayTurnJournalBinding? previous,
+  ) async {
+    _requireOperational();
+    final ready = GatewayTurnRecoveryCapability.fromGatewayReadyFrame(
+      readyFrame,
+    );
+    if (_coordinatorCapabilitySupported(ready)) return ready;
+    if (!_readyFailureAllowsLegacy(ready.failure, readyFrame)) {
+      throw const GatewayTurnCoordinatorException(
+        GatewayTurnCoordinatorFailure.invalidResponse,
+      );
+    }
+    final failure = await _unsupportedReadyFailure(previous);
+    _requireOperational();
+    // Clean absence is never a safe fallback when durable work is unresolved.
+    throw GatewayTurnCoordinatorException(
+      failure,
+      stockGateway:
+          failure == GatewayTurnCoordinatorFailure.unsupportedCapability &&
+          _readyLacksRecoveryContractCleanly(ready.failure, readyFrame),
+    );
   }
 
   /// Legacy transport is safe only when the capability decision precedes all

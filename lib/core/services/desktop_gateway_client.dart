@@ -690,16 +690,30 @@ class DesktopGatewayClient {
   /// Opens (or reuses) the gateway socket without binding it to a session.
   Future<WsClient> _connectControl() => _ensureSocket();
 
+  /// Reads the current normal socket's greeting without creating or resuming
+  /// a chat. Recovery negotiation must not mint a second stock probe socket or
+  /// treat client.capabilities (server-request support) as durable-turn proof.
+  Future<Map<String, dynamic>> readGatewayReadyFrame() async {
+    final client = await _ensureSocket();
+    final frame = await client.waitForGatewayReady();
+    if (_closed || !identical(client, _ws) || !client.isConnected) {
+      throw StateError('Gateway greeting belongs to a replaced socket.');
+    }
+    return frame;
+  }
+
   /// Creates the source-only recovery-v2 registry without changing any legacy
   /// session, submit, interrupt, or event route in this client.
   GatewayTurnCoordinatorRegistry enableTurnRecoveryCoordinator({
     GatewayTurnJournal? journal,
+    GatewayTurnReadyFrameLoader? readyFrameLoader,
   }) {
     return _turnCoordinatorRegistry ??=
         GatewayTurnCoordinatorRegistry(
             connectionId: _connectionId,
             endpointDigest: _endpointDigest(_baseUrl),
             journal: journal ?? GatewayTurnJournal(),
+            readyFrameLoader: readyFrameLoader,
             freshSocketFactory: () async {
               final ticket = await _dashboard.mintWebSocketTicket();
               final client = WsClient(

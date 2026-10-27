@@ -42,6 +42,7 @@ void main() {
         if (event.type == 'approval.request') oldEvent.complete(event);
       });
       await old.submit(localSessionId: 'mobile-1', text: 'Old explicit turn');
+      final oldSocket = gateway.socketCount - 1;
       void approval(int socket, String id) => gateway.sendServerRequest(
         socketIndex: socket,
         id: id,
@@ -53,7 +54,7 @@ void main() {
           'choices': ['once', 'deny'],
         },
       );
-      approval(0, 'same-request');
+      approval(oldSocket, 'same-request');
       final oldRequest = (await oldEvent.future).data['server_request_id']
           .toString();
       final mutation = ConnectionMutationBarrier.begin([connection.id]);
@@ -76,8 +77,11 @@ void main() {
         localSessionId: 'mobile-1',
         text: 'Fresh explicit turn',
       );
-      expect(gateway.socketCount, 2);
-      approval(1, 'same-request');
+      // Each account generation owns a normal/control socket and its gated
+      // recovery socket. Capture the latter, never address the control peer.
+      expect(gateway.socketCount, 4);
+      final currentSocket = gateway.socketCount - 1;
+      approval(currentSocket, 'same-request');
       final request = (await currentEvent.future).data['server_request_id']
           .toString();
       // Wire, runtime, stored, local and approval IDs are reused. The bridge's
@@ -115,11 +119,11 @@ void main() {
       );
       expect(
         gateway.serverResponseSocketKeys,
-        isNot(contains('1:same-request')),
+        isNot(contains('$currentSocket:same-request')),
       );
       final answered = Completer<Map<String, dynamic>>();
       gateway.onServerResponse = (socket, frame) {
-        if (socket == 1 && frame['id'] == 'same-request') {
+        if (socket == currentSocket && frame['id'] == 'same-request') {
           answered.complete(frame);
         }
       };
@@ -141,11 +145,11 @@ void main() {
       // not merely leave an already-delivered request answerable.
       final laterAnswered = Completer<Map<String, dynamic>>();
       gateway.onServerResponse = (socket, frame) {
-        if (socket == 1 && frame['id'] == 'after-late-detach') {
+        if (socket == currentSocket && frame['id'] == 'after-late-detach') {
           laterAnswered.complete(frame);
         }
       };
-      approval(1, 'after-late-detach');
+      approval(currentSocket, 'after-late-detach');
       final laterRequest = (await laterEvent.future).data['server_request_id']
           .toString();
       expect(
@@ -165,7 +169,7 @@ void main() {
       // Exact still-open removal must retain its existing rejection semantics.
       final rejected = Completer<Map<String, dynamic>>();
       gateway.onServerResponse = (socket, frame) {
-        if (socket == 1 && frame['id'] == 'detach-request') {
+        if (socket == currentSocket && frame['id'] == 'detach-request') {
           rejected.complete(frame);
         }
       };
@@ -173,12 +177,12 @@ void main() {
       final exact = current.setAsyncEventListener('mobile-1', (_, event) {
         if (event.type == 'approval.request') delivered.complete();
       });
-      approval(1, 'detach-request');
+      approval(currentSocket, 'detach-request');
       await delivered.future;
       current.removeAsyncEventListener('mobile-1', token);
       expect(
         gateway.serverResponseSocketKeys,
-        isNot(contains('1:detach-request')),
+        isNot(contains('$currentSocket:detach-request')),
       );
       current.removeAsyncEventListener('mobile-1', exact);
       current.removeAsyncEventListener('mobile-1', exact);
@@ -434,13 +438,17 @@ void main() {
       );
 
       await session.submit(localSessionId: 'mobile-1', text: 'Hello');
-      expect(gateway.socketCount, 1);
+      expect(gateway.socketCount, 2);
+      const firstSocket = 1; // socket 0 is the app-owned normal/control peer
+      const secondSocket = 2;
+      const thirdSocket = 3;
 
       gateway.sendServerRequest(
         id: 'recovery-clarify',
         method: 'clarify',
+        socketIndex: firstSocket,
         params: {
-          'session_id': 'runtime-1',
+          'session_id': 'runtime-2',
           'questions': [
             {'qid': 'q1', 'question': 'Proceed?'},
           ],
@@ -479,8 +487,9 @@ void main() {
         gateway.sendServerRequest(
           id: request.id,
           method: request.method,
+          socketIndex: firstSocket,
           params: {
-            'session_id': 'runtime-1',
+            'session_id': 'runtime-2',
             if (request.method == 'approval') ...{
               'request_id': 'approval-1',
               'command': 'echo ok',
@@ -503,8 +512,9 @@ void main() {
       gateway.sendServerRequest(
         id: 'recovery-approval-concurrent',
         method: 'approval',
+        socketIndex: firstSocket,
         params: {
-          'session_id': 'runtime-1',
+          'session_id': 'runtime-2',
           'request_id': 'approval-2',
           'command': 'echo concurrent',
           'choices': ['once', 'deny'],
@@ -569,10 +579,16 @@ void main() {
       expect(gateway.serverResponses['recovery-secret']?['result'], {
         'value': 'secret-value',
       });
-      expect(gateway.serverResponseSocketIndexes['recovery-approval'], 0);
-      expect(gateway.serverResponseSocketIndexes['recovery-sudo'], 0);
-      expect(gateway.serverResponseSocketIndexes['recovery-secret'], 0);
-      expect(gateway.clarifyLockSocketIndexes.single, 0);
+      expect(
+        gateway.serverResponseSocketIndexes['recovery-approval'],
+        firstSocket,
+      );
+      expect(gateway.serverResponseSocketIndexes['recovery-sudo'], firstSocket);
+      expect(
+        gateway.serverResponseSocketIndexes['recovery-secret'],
+        firstSocket,
+      );
+      expect(gateway.clarifyLockSocketIndexes.single, firstSocket);
 
       final staleSecondEvents = <StreamEvent>[];
       final staleSecondRegistration = session.setAsyncEventListener(
@@ -580,13 +596,13 @@ void main() {
         (_, event) => staleSecondEvents.add(event),
       );
       await session.submit(localSessionId: 'mobile-2', text: 'Hello again');
-      expect(gateway.socketCount, 2);
+      expect(gateway.socketCount, 3);
       gateway.sendServerRequest(
         id: 'recovery-replayed',
         method: 'secret',
-        socketIndex: 1,
+        socketIndex: secondSocket,
         params: {
-          'session_id': 'runtime-2',
+          'session_id': 'runtime-3',
           'env_var': 'REPLAYED_TOKEN',
           'prompt': 'Replayed token',
         },
@@ -640,9 +656,9 @@ void main() {
       gateway.sendServerRequest(
         id: 'recovery-second-secret',
         method: 'secret',
-        socketIndex: 1,
+        socketIndex: secondSocket,
         params: {
-          'session_id': 'runtime-2',
+          'session_id': 'runtime-3',
           'env_var': 'SECOND_TOKEN',
           'prompt': 'Second token',
         },
@@ -676,9 +692,16 @@ void main() {
       await _waitFor(
         () => gateway.serverResponses.containsKey('recovery-second-secret'),
       );
-      expect(gateway.serverResponseSocketIndexes['recovery-second-secret'], 1);
+      expect(
+        gateway.serverResponseSocketIndexes['recovery-second-secret'],
+        secondSocket,
+      );
 
-      for (var socketIndex = 0; socketIndex < 2; socketIndex++) {
+      for (
+        var socketIndex = firstSocket;
+        socketIndex <= secondSocket;
+        socketIndex++
+      ) {
         gateway.sendServerRequest(
           id: 'shared-request-id',
           method: 'secret',
@@ -744,8 +767,8 @@ void main() {
       );
       await _waitFor(
         () => gateway.serverResponseSocketKeys.containsAll({
-          '0:shared-request-id',
           '1:shared-request-id',
+          '2:shared-request-id',
         }),
       );
 
@@ -755,13 +778,13 @@ void main() {
         (_, event) => thirdOldEvents.add(event),
       );
       await session.submit(localSessionId: 'mobile-3', text: 'Third session');
-      expect(gateway.socketCount, 3);
+      expect(gateway.socketCount, 4);
       gateway.sendServerRequest(
         id: 'partial-clarify',
         method: 'clarify',
-        socketIndex: 2,
+        socketIndex: thirdSocket,
         params: {
-          'session_id': 'runtime-3',
+          'session_id': 'runtime-4',
           'questions': [
             {'qid': 'q1', 'question': 'First?'},
             {'qid': 'q2', 'question': 'Second?'},
@@ -823,8 +846,9 @@ void main() {
       gateway.sendServerRequest(
         id: 'recovery-pending-detach',
         method: 'secret',
+        socketIndex: firstSocket,
         params: {
-          'session_id': 'runtime-1',
+          'session_id': 'runtime-2',
           'env_var': 'PENDING_TOKEN',
           'prompt': 'Pending token',
         },
@@ -849,8 +873,9 @@ void main() {
       gateway.sendServerRequest(
         id: 'recovery-detached',
         method: 'secret',
+        socketIndex: firstSocket,
         params: {
-          'session_id': 'runtime-1',
+          'session_id': 'runtime-2',
           'env_var': 'DETACHED_TOKEN',
           'prompt': 'Detached token',
         },
@@ -866,9 +891,9 @@ void main() {
       gateway.sendServerRequest(
         id: 'recovery-disconnected',
         method: 'approval',
-        socketIndex: 1,
+        socketIndex: secondSocket,
         params: {
-          'session_id': 'runtime-2',
+          'session_id': 'runtime-3',
           'request_id': 'approval-disconnected',
           'command': 'echo disconnected',
           'choices': ['once', 'deny'],
@@ -893,7 +918,7 @@ void main() {
           )
           .data['server_request_id']
           .toString();
-      await gateway.closeSocket(1);
+      await gateway.closeSocket(secondSocket);
       await _waitFor(
         () => secondEvents.any(
           (event) =>
