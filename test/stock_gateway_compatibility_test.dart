@@ -384,6 +384,31 @@ void main() {
   );
 
   test(
+    'canonical authority cannot become clean stock or ordinary fallback',
+    () async {
+      gateway.sessionAuthority = true;
+      await expectLater(
+        controller.sessionFor(gateway.connection).recoverPending('fresh-draft'),
+        throwsA(
+          isA<GatewayTurnCoordinatorException>()
+              .having(
+                (error) => error.failure,
+                'failure',
+                GatewayTurnCoordinatorFailure.invalidResponse,
+              )
+              .having((error) => error.stockGateway, 'stockGateway', isFalse),
+        ),
+      );
+      expect(gateway.sockets, hasLength(1));
+      expect(gateway.tickets, 1);
+      expect(gateway.calls('session.open'), isEmpty);
+      expect(gateway.calls('session.create'), isEmpty);
+      expect(gateway.calls('prompt.submit'), isEmpty);
+      expect(store.value, isNull);
+    },
+  );
+
+  test(
     'malformed recovery advertisement does not become stock fallback',
     () async {
       gateway.recovery = true;
@@ -597,6 +622,7 @@ class _Gateway {
   bool explicitComplete = false;
   bool recovery = false;
   bool unsafeRecovery = false;
+  bool sessionAuthority = false;
   bool downgradeRecoverySocket = false;
   bool _closed = false;
   int _bindingVersion = 0;
@@ -647,6 +673,7 @@ class _Gateway {
               'type': 'gateway.ready',
               'payload': {
                 'skin': {'name': 'default'},
+                if (sessionAuthority) 'session_authority': true,
                 'change_events': true,
                 'heartbeat': true,
                 'replay_epoch': 'epoch-$index',
