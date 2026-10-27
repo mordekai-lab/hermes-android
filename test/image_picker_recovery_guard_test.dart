@@ -60,6 +60,42 @@ void main() {
     },
   );
 
+  test(
+    'empty cache keeps the fence until a late native result arrives',
+    () async {
+      SharedPreferences.setMockInitialValues({key: 'old-clarification-marker'});
+      final prefs = await SharedPreferences.getInstance();
+      expect(
+        await ImagePickerRecoveryGuard.recoverForComposer(
+          () async => LostDataResponse.empty(),
+        ),
+        isNull,
+      );
+      expect(prefs.getString(key), 'old-clarification-marker');
+      final lateResult = LostDataResponse(
+        files: [XFile('/picker/late.png')],
+        type: RetrieveType.image,
+      );
+      expect(
+        await ImagePickerRecoveryGuard.recoverForComposer(
+          () async => lateResult,
+        ),
+        isNull,
+      );
+      expect(prefs.containsKey(key), isFalse);
+      final composerResult = LostDataResponse(
+        files: [XFile('/picker/composer.png')],
+        type: RetrieveType.image,
+      );
+      expect(
+        await ImagePickerRecoveryGuard.recoverForComposer(
+          () async => composerResult,
+        ),
+        same(composerResult),
+      );
+    },
+  );
+
   test('ordinary composer recovery preserves exact native response', () async {
     final response = LostDataResponse(
       files: [XFile('/picker/image.png')],
@@ -91,7 +127,10 @@ void main() {
         ),
         isNull,
       );
-      expect((await SharedPreferences.getInstance()).containsKey(key), isFalse);
+      expect(
+        (await SharedPreferences.getInstance()).getString(key),
+        'old-clarification-marker',
+      );
     },
   );
 

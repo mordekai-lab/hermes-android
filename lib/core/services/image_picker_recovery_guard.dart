@@ -66,7 +66,9 @@ abstract final class ImagePickerRecoveryGuard {
   /// Returns null for a clarification-origin lost result (including a stale
   /// marker with no result). Do not restore its request heuristically: a cold
   /// process cannot prove that exact question/connection is still current.
-  /// Keep the marker until retrieval succeeds, so an error fails closed.
+  /// Keep the marker until a populated result is retrieved: Android copies
+  /// content-provider images asynchronously, so an empty cache is not proof
+  /// that its old picker has finished producing a result.
   static Future<LostDataResponse?> recoverForComposer(
     Future<LostDataResponse> Function() retrieve,
   ) => _serialized(() async {
@@ -75,6 +77,7 @@ abstract final class ImagePickerRecoveryGuard {
     final marker = prefs.getString(pendingClarifyKey);
     final response = await retrieve();
     if (marker == null) return response;
+    if (response.isEmpty) return null;
     if (prefs.getString(pendingClarifyKey) == marker &&
         !await prefs.remove(pendingClarifyKey)) {
       throw StateError('Unable to clear the recovered image picker owner');

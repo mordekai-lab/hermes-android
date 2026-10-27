@@ -37,6 +37,9 @@ question. If Android kills the app while the picker is open, its recovered
 result is discarded rather than attached to a later chat prompt. Reopen the
 still-pending question and select the image again. Ordinary composer-picker
 recovery is unchanged. No original photo is deleted during this discard.
+An empty recovery read keeps the clarification fence: the native image copy can
+finish later. Until that result arrives, recovery stays conservative rather than
+treating an empty cache as proof that no question image remains.
 
 ## Compatibility
 

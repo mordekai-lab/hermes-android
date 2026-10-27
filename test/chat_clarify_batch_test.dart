@@ -455,6 +455,54 @@ void main() {
   }
 
   testWidgets(
+    'empty recovery then late clarification result stays out of remounted composer',
+    (tester) async {
+      const key = ImagePickerRecoveryGuard.pendingClarifyKey;
+      const channel = MethodChannel('plugins.flutter.io/image_picker');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      var reads = 0;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method != 'retrieve') return null;
+        if (++reads == 1) {
+          return null; // native content-provider copy still pending
+        }
+        return {
+          'type': 'image',
+          'path': '/picker/late-question.png',
+          'pathList': ['/picker/late-question.png'],
+        };
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      final firstDrafts = _ClarifyDrafts();
+      await _pumpChat(
+        tester,
+        drafts: firstDrafts,
+        preferences: {key: 'old-clarification-marker'},
+      );
+      await _pumpFrames(tester, const Duration(milliseconds: 200));
+      final marker = (await SharedPreferences.getInstance()).getString(key);
+      expect(marker, isNotNull);
+      expect(firstDrafts.preparations, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await _pumpFrames(tester);
+      final nextDrafts = _ClarifyDrafts();
+      await _pumpChat(
+        tester,
+        drafts: nextDrafts,
+        composerText: 'Different chat draft',
+        preferences: {key: marker!},
+      );
+      await _pumpFrames(tester, const Duration(milliseconds: 200));
+      expect(reads, 2);
+      expect(nextDrafts.preparations, 0);
+      expect(find.text('late-question.png'), findsNothing);
+      expect((await SharedPreferences.getInstance()).containsKey(key), isFalse);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'lost picker failure stays fail-closed without startup exception',
     (tester) async {
       const channel = MethodChannel('plugins.flutter.io/image_picker');
