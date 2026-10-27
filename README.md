@@ -136,6 +136,14 @@ rows and offers Retry rather than claiming the archive is empty.
 
 ## Remote Gateway edition highlights
 
+**Unreleased stock-gateway compatibility:** classic/standalone stock JSON-RPC
+uses its normal session socket without a disposable recovery probe or permanent
+recovery-failure banner. Experimental durable recovery still requires its full
+advertised contract. Canonical `session_authority: true` is a different,
+unsupported protocol; recovery preflight rejects it rather than treating it as
+classic stock absence. This is not current-main protocol parity or an exactly-once
+guarantee. See the [contract decision and limits](docs/STOCK_GATEWAY_COMPATIBILITY.md).
+
 - One Desktop Gateway JSON-RPC session for text, images, and files.
 - Copy/select text, Read aloud, Stop, Edit and resend, Regenerate, and export.
 - Up to 10 Remote Gateway attachments per draft, capped at 64 MiB total;

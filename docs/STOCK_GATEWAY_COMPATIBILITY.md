@@ -61,6 +61,11 @@ acceptance tests. Do not claim all current-main deployment modes are verified or
 infer v2 support from the new boolean. The upstream negotiation discussion
 remains a separate dependency.[12]
 
+In recovery preflight, a `session_authority: true` greeting is explicitly
+excluded from both clean stock absence and ordinary fallback. It yields a typed invalid-response failure
+with `stockGateway: false`, before a dedicated recovery socket, journal write or
+submission. This is rejection of an unsupported contract, not an adapter.
+
 ## Client implementation
 
 1. Recovery admission reads the immutable `gateway.ready` from the app-owned
@@ -132,6 +137,7 @@ explicitly synthetic, not evidence that upstream implements Android v2.
 | Control disconnect | Neither a running experimental draft nor an unsafe-advertisement gate is cleared by normal/control state notifications. |
 | Upgrade/downgrade | New greeting can enable a later draft; a capability downgrade with unresolved journal entries leaves the journal unchanged and cannot create/resubmit a normal turn. |
 | Unsafe advertisement | Reject before opening a recovery socket or writing v2 state; do not relabel it as clean stock absence. |
+| Canonical authority | `session_authority: true` is a typed failure, not stock fallback; one control socket, zero recovery opens, journal writes or submissions. |
 
 Related regressions retain server-request routing across separate recovery
 sockets, route remount, bounded large-session attach/history, stale-socket

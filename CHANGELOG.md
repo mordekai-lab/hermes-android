@@ -6,6 +6,25 @@ shows only the three latest releases.
 
 ## [Unreleased]
 
+### Fixed
+
+- Classic/standalone stock JSON-RPC drafts negotiate on the normal session
+  socket instead of opening a disposable recovery probe. Missing experimental
+  recovery support no longer causes a permanent failure banner or REST downgrade.
+- Normal/control observations and unrelated history cannot erase the selected
+  experimental reply, reasoning or tool presentation. Successful handover needs
+  the explicitly referenced saved assistant row, not matching prose.
+- Canonical `session_authority: true` cannot be misclassified as clean classic
+  stock absence. It remains unsupported and fails closed without a submission
+  or a new recovery journal entry.
+
+This implements the classic/standalone contract decision in #84, not canonical
+protocol parity, exactly-once stock submission or new background guarantees.
+Reconnect remains reconciliation, never automatic resend. Earlier resume and
+bounded-history fixes are retained. See [the compatibility guide](docs/STOCK_GATEWAY_COMPATIBILITY.md).
+Thanks to the #84 reporters for the version-labelled transport traces. Hermes
+Agent assisted with implementation, independent review and regression tests.
+
 ## [3.0.2] - 2026-10-27
 
 Release identity is `3.0.2+3006`, with production APK codes `30061`, `30062` and
