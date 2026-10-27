@@ -24,6 +24,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../mobile_push_service_test.dart' show MemorySecrets;
 import '../normal_gateway_alias_handoff_wire_test.dart' show BindingServer;
 import 'memory_turn_journal_store.dart';
+import 'stock_chat_ready.dart';
 
 class _Server extends BindingServer {
   _Server(super.server);
@@ -116,13 +117,7 @@ class MutationObserverRootFixture {
       ),
     );
     await until(tester, () => find.byType(ChatScreen).evaluate().isNotEmpty);
-    await until(
-      tester,
-      () => find
-          .byKey(const ValueKey('legacy-transport-notice'))
-          .evaluate()
-          .isNotEmpty,
-    );
+    await stockChatReady(tester, controller, connection);
     await drain(tester);
   }
 

@@ -354,8 +354,8 @@ void main() {
   testWidgets('v2 terminal state refreshes history skipped during submit', (
     tester,
   ) async {
-    // Recovery/read ordering must preserve raw history without inventing
-    // completion evidence for these untyped saved transcript rows.
+    // Physical history may hand off the successful response only when its
+    // saved row matches the snapshot's explicit final_message_ref (7).
     SharedPreferences.setMockInitialValues({'verbose_mode': true});
     final submitGate = Completer<void>();
     final history = _DelayedRefreshChatHttpClient();
@@ -1279,9 +1279,9 @@ class _DelayedRefreshChatHttpClient extends http.BaseClient {
         refreshedMessagesUri.complete(request.url);
       }
       return _response([
-        {'role': 'assistant', 'content': 'Existing transcript row'},
-        {'role': 'user', 'content': 'Durable turn'},
-        {'role': 'assistant', 'content': 'Done'},
+        {'id': 5, 'role': 'assistant', 'content': 'Existing transcript row'},
+        {'id': 6, 'role': 'user', 'content': 'Durable turn'},
+        {'id': 7, 'role': 'assistant', 'content': 'Done'},
       ]);
     }
     return http.StreamedResponse(
